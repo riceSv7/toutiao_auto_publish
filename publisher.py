@@ -20,6 +20,36 @@ def _load_cookies() -> list[dict]:
     ]
 
 
+def _close_popups(page: Page) -> None:
+    """关闭页面上的广告弹窗、活动对话框等遮挡元素"""
+    # 1. 尝试点击常见的关闭按钮
+    close_selectors = [
+        '.byte-modal-close',           # 弹窗关闭按钮
+        '[class*="close"]',            # 包含 close 的元素
+        'svg[class*="close"]',         # SVG 关闭图标
+        '.modal-close',                # 通用模态框关闭
+        '[aria-label="关闭"]',         # 无障碍标签
+        '[aria-label="Close"]',        # 英文无障碍标签
+    ]
+    for sel in close_selectors:
+        try:
+            el = page.locator(sel).first
+            if el.is_visible(timeout=2000):
+                el.click()
+                print(f"已关闭弹窗（选择器: {sel}）")
+                time.sleep(1)
+        except:
+            pass
+
+    # 2. 按 ESC 键尝试关闭弹窗
+    page.keyboard.press("Escape")
+    time.sleep(0.5)
+
+    # 3. 如果页面顶部有大 banner 图遮挡，尝试滚动一点距离
+    page.evaluate("window.scrollBy(0, 100)")
+    time.sleep(0.5)
+
+
 def _fill_title(page: Page, title: str) -> None:
     # 头条编辑器标题栏 —— 多种可能选择器
     selectors = [
@@ -153,6 +183,9 @@ def publish(title: str, body: str) -> None:
             page.wait_for_load_state("networkidle")
             time.sleep(3)
             print(f"已打开发布页面: {PUBLISH_URL}")
+
+            # 2.5 清理可能出现的弹窗和遮挡
+            _close_popups(page)
 
             # 3. 填写标题和正文
             _fill_title(page, title)
