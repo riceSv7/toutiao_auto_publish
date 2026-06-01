@@ -251,128 +251,252 @@ def _dismiss_cover_panel(page: Page) -> None:
     print("已尝试关闭封面上传面板")
 
 
+def _dump_cover_ui(page: Page) -> None:
+    """诊断日志：打印页面上与封面相关的真实 DOM 元素（帮助调试选择器）"""
+    time.sleep(1)
+    info = page.evaluate("""
+        () => {
+            function getPath(el) {
+                if (!el || el === document.body) return 'body';
+                let path = el.tagName.toLowerCase();
+                if (el.className && typeof el.className === 'string') path += '.' + el.className.split(' ').filter(c => c).join('.');
+                if (el.id) path += '#' + el.id;
+                return path;
+            }
+            const results = [];
+
+            // 1. 找所有 class 含 cover 的元素
+            const coverEls = document.querySelectorAll('[class*="cover"]');
+            coverEls.forEach(el => {
+                const rect = el.getBoundingClientRect();
+                results.push({
+                    type: 'cover_class',
+                    tag: getPath(el),
+                    text: (el.textContent || '').trim().substring(0, 80),
+                    width: Math.round(rect.width),
+                    height: Math.round(rect.height),
+                    x: Math.round(rect.x),
+                    y: Math.round(rect.y),
+                    visible: rect.width > 0 && rect.height > 0 && el.offsetParent !== null
+                });
+            });
+
+            // 2. 找所有含"封面"文字的元素
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+            let node;
+            while (node = walker.nextNode()) {
+                if (!node.textContent) continue;
+                const txt = node.textContent.trim();
+                if ((txt.includes('封面') || txt.includes('正版') || txt.includes('图库')) && txt.length < 50) {
+                    results.push({
+                        type: 'text_match',
+                        tag: getPath(node),
+                        text: txt.substring(0, 80),
+                        visible: node.offsetParent !== null
+                    });
+                }
+            }
+
+            // 3. 所有可见 button（前20个）
+            const buttons = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null).slice(0, 20);
+            buttons.forEach(b => {
+                results.push({
+                    type: 'visible_button',
+                    tag: getPath(b),
+                    text: (b.textContent || '').trim().substring(0, 40)
+                });
+            });
+
+            // 4. 所有 iframe
+            const iframes = [...document.querySelectorAll('iframe')].map(f => ({
+                type: 'iframe',
+                src: (f.src || '').substring(0, 120),
+                visible: f.offsetParent !== null
+            }));
+            results.push(...iframes);
+
+            return JSON.stringify(results, null, 2);
+        }
+    """)
+    print(f"[封面诊断] \n{info}")
+
+
 def _set_cover(page: Page) -> None:
     """
-    点击封面 + 号 → 选「免费正版图片」→ 选第一张图片。
-    纯点击流，不依赖本地文件。
+    点击封面 + 号 → 在弹出的上传面板中选「免费正版图片」→ 选第一张图片。
+    真实头条编辑器的封面区在正文上方，点击「添加封面」触发上传面板。
     """
-    # 等待页面稳定
     time.sleep(2)
     page.wait_for_load_state("networkidle")
     time.sleep(1)
-
-    # 确保没有弹窗遮挡
     _close_popups(page)
 
-    # ★ 关键：检测封面是否已经设置好了，如果是则直接跳过
+    # ★ 打印封面区域诊断信息
+    _dump_cover_ui(page)
+
+    # ★ 检测封面是否已设置
     if _is_cover_already_set(page):
         return
 
-    # ========== 第一步：点击封面区域的 + 号按钮 ==========
-    cover_add_btn = page.locator('.article-cover-add').first
-    if cover_add_btn.count() == 0:
-        # 兜底：用坐标点击（正文编辑器上方约 60px）
+    # ========== 步骤 0：点击「添加封面」触发上传面板 ==========
+    # 头条编辑器页面上最明显的封面触发器是"添加封面"文字
+    clicked_trigger = False
+    trigger_selectors = [
+        'text=添加封面',
+        'span:has-text("添加封面")',
+        'div:has-text("添加封面")',
+        '.article-cover-add',
+        '[class*="cover-add"]',
+        '[class*="cover"] [class*="add"]',
+    ]
+    for sel in trigger_selectors:
         try:
-            editor = page.locator('[contenteditable="true"]').first
-            if editor.count() > 0:
-                box = editor.bounding_box()
-                if box:
-                    page.mouse.click(box['x'] + box['width'] / 2, box['y'] - 60)
-                    print("坐标点击了封面区域")
-                    time.sleep(2)
+            el = page.locator(sel).first
+            if el.count() > 0 and el.is_visible(timeout=3000):
+                el.scroll_into_view_if_needed()
+                time.sleep(0.3)
+                el.click()
+                print(f"✅ 步骤0：点击封面触发器 ({sel})")
+                time.sleep(2)
+                clicked_trigger = True
+                break
         except:
-            pass
-    else:
-        cover_add_btn.scroll_into_view_if_needed()
-        time.sleep(0.3)
-        cover_add_btn.click()
-        print("✅ 点击了封面 + 号按钮 (.article-cover-add)")
+            continue
+
+    if not clicked_trigger:
+        # JS 兜底：找含"添加封面"文字的可见元素并点击
+        page.evaluate("""
+            () => {
+                const all = [...document.querySelectorAll('*')];
+                const el = all.find(e => e.textContent?.trim() === '添加封面' && e.offsetParent !== null);
+                if (el) { el.click(); return true; }
+                return false;
+            }
+        """)
+        print("JS 兜底点击「添加封面」")
         time.sleep(2)
 
-    # ========== 第二步：在弹出面板中点击「免费正版图片」==========
+    # ========== 步骤 1：面板弹出来了，找「免费正版图片」 ==========
+    # 面板中可能有 Tab 标签切换，找"免费正版图片"或"正版图库"等
     free_selectors = [
         'text=免费正版图片',
+        'text=正版图库',
+        'text=免费图片',
+        'text=正版图片',
         'span:has-text("免费正版图片")',
         'div:has-text("免费正版图片")',
-        '[class*="tab"]:has-text("免费正版")',
-        'text=正版图片',
+        '[class*="tab"]:has-text("免费")',
+        '[class*="tab"]:has-text("正版")',
+        '[role="tab"]:has-text("免费")',
+        '[role="tab"]:has-text("正版")',
     ]
     free_clicked = False
     for sel in free_selectors:
         try:
             btn = page.locator(sel).first
-            if btn.is_visible(timeout=3000):
+            if btn.count() > 0 and btn.is_visible(timeout=3000):
                 btn.click()
-                print(f"✅ 点击了「免费正版图片」(选择器: {sel})")
+                print(f"✅ 步骤1：点击图片来源标签 ({sel})")
                 time.sleep(2)
                 free_clicked = True
                 break
         except:
             continue
 
+    # 如果没找到tab，可能默认就是免费图片列表，直接跳到选图
     if not free_clicked:
-        print("⚠ 未找到「免费正版图片」按钮，尝试直接选图...")
+        print("⚠ 步骤1：未找到「免费正版图片」标签，可能已在免费图片列表，尝试直接选图")
+        # 截图保存当前面板
+        page.screenshot(path=f"cover_panel_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+        # Dump 面板内部元素
+        panel_html = page.evaluate("""
+            () => {
+                const modals = document.querySelectorAll('.byte-modal, .byte-drawer, [class*="modal"], [class*="dialog"], [class*="drawer"]');
+                const texts = [];
+                modals.forEach(m => {
+                    const style = window.getComputedStyle(m);
+                    if (style.display !== 'none') {
+                        texts.push('=== 面板 HTML ===');
+                        texts.push(m.outerHTML.substring(0, 3000));
+                        // 面板内所有可见文本
+                        const all = [...m.querySelectorAll('*')];
+                        const uniqueTexts = [...new Set(all.filter(e => e.children.length === 0 && e.offsetParent !== null).map(e => e.textContent.trim()).filter(t => t && t.length < 30))];
+                        texts.push('=== 面板内可见文本 ===');
+                        texts.push(JSON.stringify(uniqueTexts.slice(0, 50)));
+                    }
+                });
+                return texts.join('\\n');
+            }
+        """)
+        print(f"[面板内容]\n{panel_html}")
 
-    # ========== 第三步：选择第一张免费图片 ==========
-    # 等待图片列表加载
-    time.sleep(2)
+    # ========== 步骤 2：选第一张图片 ==========
+    time.sleep(3)  # 等图片列表加载完
 
-    # 尝试多种方式选择第一张图片
-    image_selectors = [
-        '.image-item:first-child img',
-        '.image-item:first-child',
-        '.cover-image-item:first-child img',
-        '.cover-image-item:first-child',
-        '[class*="image-list"] img:first-child',
-        '[class*="image-list"] [class*="item"]:first-child',
-        '[class*="image-list"] [class*="item"]:first-child img',
-        '[class*="cover-list"] img:first-child',
-        '[class*="cover-list"] [class*="item"]:first-child',
-        '[class*="pic"] img:first-child',
-        '.byte-image:first-child',
-        'img[src*="toutiao"]',  # 头条图库的图片
-    ]
     img_clicked = False
+    # 策略 A: 在弹窗/modal 中找第一张图片
+    image_selectors = [
+        '.byte-modal img[src]',
+        '[class*="modal"] img[src]',
+        '[class*="dialog"] img[src]',
+        '[class*="drawer"] img[src]',
+        '.image-item img',
+        '.image-item',
+        '[class*="image-list"] [class*="item"]:first-child img',
+        '[class*="image-list"] [class*="item"]:first-child',
+        '[class*="pic-list"] img:first-child',
+        '[class*="pic-list"] [class*="item"]:first-child',
+    ]
     for sel in image_selectors:
         try:
-            img = page.locator(sel).first
-            if img.count() > 0 and img.is_visible(timeout=2000):
-                img.scroll_into_view_if_needed()
-                time.sleep(0.3)
-                img.click()
-                print(f"✅ 点击了封面图片 (选择器: {sel})")
-                time.sleep(1)
-                img_clicked = True
-                break
+            imgs = page.locator(sel)
+            count = imgs.count()
+            if count > 0:
+                img = imgs.first
+                if img.is_visible(timeout=2000):
+                    img.scroll_into_view_if_needed()
+                    time.sleep(0.3)
+                    img.click()
+                    print(f"✅ 步骤2：点击封面图片 ({sel}, 共{count}张)")
+                    time.sleep(1)
+                    img_clicked = True
+                    break
         except:
             continue
 
-    # 如果以上都失败，用 JS 直接找并点击第一张可见图片
+    # 策略 B: JS 在弹窗内找合适尺寸的图片
     if not img_clicked:
         result = page.evaluate("""
             () => {
-                const imgs = document.querySelectorAll('img[src]');
+                // 先找弹窗容器
+                const containers = document.querySelectorAll('.byte-modal, .byte-drawer, [class*="modal"]:not([class*="mask"]), [class*="dialog"]');
+                let searchRoot = document.body;
+                for (const c of containers) {
+                    if (window.getComputedStyle(c).display !== 'none') {
+                        searchRoot = c;
+                        break;
+                    }
+                }
+                const imgs = searchRoot.querySelectorAll('img[src]');
                 for (const img of imgs) {
-                    const style = window.getComputedStyle(img);
                     const rect = img.getBoundingClientRect();
-                    if (rect.width > 50 && rect.height > 50 && style.display !== 'none' && style.visibility !== 'hidden') {
-                        // 跳过图标和小图
-                        if (rect.width < 200 || rect.height < 150) continue;
-                        if (img.src.includes('avatar') || img.src.includes('icon') || img.src.includes('logo')) continue;
+                    if (rect.width >= 100 && rect.height >= 75 && img.offsetParent !== null) {
+                        if (img.src.includes('avatar') || img.src.includes('icon') || img.src.includes('logo') || img.src.includes('favicon')) continue;
                         img.click();
-                        return 'CLICKED:' + img.src.substring(0, 80);
+                        return 'CLICKED:' + rect.width + 'x' + rect.height + ' ' + img.src.substring(0, 60);
                     }
                 }
                 return 'NOT_FOUND';
             }
         """)
         if result.startswith('CLICKED:'):
-            print(f"✅ JS 点击了封面图片: {result}")
+            print(f"✅ 步骤2-JS：点击了封面图片 ({result})")
             img_clicked = True
         else:
-            print("⚠ 未找到可选封面图片")
+            print(f"⚠ 步骤2：所有策略都未找到可选图片。JS结果: {result}")
+            page.screenshot(path=f"cover_no_img_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
 
-    # ========== 第四步：确认选择（如有确认按钮）==========
+    # ========== 步骤 3：确认 ==========
     if img_clicked:
         time.sleep(1)
         confirm_selectors = [
@@ -380,15 +504,16 @@ def _set_cover(page: Page) -> None:
             'button:has-text("完成")',
             'span:has-text("确定")',
             'button:has-text("设为封面")',
-            '.byte-btn-primary:has-text("确定")',
-            '.byte-btn-primary:has-text("完成")',
+            'button:has-text("使用")',
+            '.byte-btn-primary',
+            '[class*="btn-primary"]',
         ]
         for sel in confirm_selectors:
             try:
                 btn = page.locator(sel).first
-                if btn.is_visible(timeout=2000):
+                if btn.count() > 0 and btn.is_visible(timeout=2000):
                     btn.click()
-                    print(f"✅ 点击确认按钮 (选择器: {sel})")
+                    print(f"✅ 步骤3：点击确认按钮 ({sel})")
                     time.sleep(1)
                     break
             except:
