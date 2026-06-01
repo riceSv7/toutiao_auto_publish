@@ -107,7 +107,7 @@ def _parse_content(raw: str) -> tuple[str, str]:
     re.sub(r"^(\s*[#>*\-]+\s*|\d+\.\s*)", "", line)
     for line in body.split("\n")
 )
-   if not title:
+    if not title:
     # 尝试寻找第一个非空且长度合适的行作为标题
     for line in lines:
         if line.strip() and len(line.strip()) >= 5:
