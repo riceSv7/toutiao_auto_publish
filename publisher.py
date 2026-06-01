@@ -342,51 +342,32 @@ def _set_cover(page: Page) -> None:
     time.sleep(3)  # 等待封面组件异步加载
     _dump_cover_ui(page)
 
-    # ========== 步骤1：以「无封面」为锚点找右侧加号 ==========
-    print("封面流程：以「无封面」为锚点找加号大框...")
-    click_result = page.evaluate("""
-        () => {
-            // 找「无封面」文本元素
-            const all = [...document.querySelectorAll('*')];
-            const noCover = all.find(e => (e.textContent||'').trim()==='无封面' && e.offsetParent && e.children.length<=1);
-            if (!noCover) return JSON.stringify({status:'NO_ANCHOR'});
-            const ar = noCover.getBoundingClientRect();
-            // 在「无封面」右侧找候选：left在ar.right+5到ar.right+350, top在ar.top-30到ar.bottom+80
-            const candidates = all.filter(e => {
-                if (!e.offsetParent || e===noCover || e.contains(noCover)) return false;
-                const r = e.getBoundingClientRect();
-                return r.left>=ar.right+5 && r.right<=ar.right+350 && r.top>=ar.top-30 && r.bottom<=ar.bottom+80 && r.width>30 && r.height>30;
-            }).map(e => {
-                const r = e.getBoundingClientRect(); const txt = (e.textContent||'').trim();
-                const isPlus = txt==='' || txt==='+' || txt==='＋' || e.tagName==='A' || (e.className||'').includes('add') || (e.className||'').includes('cover');
-                return {tag:e.tagName, cls:(e.className||'').substring(0,60), txt:txt.substring(0,20), w:Math.round(r.w), h:Math.round(r.h), x:Math.round(r.x), y:Math.round(r.y), plus:isPlus};
-            });
-            if (!candidates.length) return JSON.stringify({status:'NO_CANDIDATES'});
-            // 选最像加号的：尺寸>50x50 且距离最近
-            candidates.sort((a,b) => a.x - b.x);
-            const best = candidates.find(c => c.plus && c.w>50 && c.h>50) || candidates.find(c => c.plus) || candidates[0];
-            // 点击
-            const clickEl = all.find(e => {
-                const r = e.getBoundingClientRect();
-                return Math.round(r.x)===best.x && Math.round(r.y)===best.y;
-            });
-            if (clickEl) { clickEl.scrollIntoView({block:'center'}); clickEl.click(); }
-            return JSON.stringify({status:clickEl?'CLICKED':'FAILED', best, candidates});
-        }
-    """)
-    print(f"锚点定位结果: {click_result}")
+    # ========== 步骤1：点击 .article-cover-add 加号大框 ==========
+    print("封面流程：点击 .article-cover-add 加号...")
+    clicked = False
     try:
-        res = json.loads(click_result)
-        if res.get('status') != 'CLICKED':
-            # 坐标兜底: 正文编辑器上方80px, 偏右450px
-            editor = page.locator('[contenteditable="true"]').first
-            box = editor.bounding_box()
-            if box:
-                page.mouse.click(box['x']+450, box['y']-80)
-                print(f"坐标兜底加号 ({box['x']+450}, {box['y']-80})")
-    except:
+        plus_btn = page.locator('.article-cover-add').first
+        if plus_btn.count() > 0:
+            plus_btn.wait_for(state="visible", timeout=5000)
+            plus_btn.scroll_into_view_if_needed()
+            plus_btn.click()
+            print("✅ 已点击 .article-cover-add 加号大框")
+            clicked = True
+    except Exception as e:
+        print(f".article-cover-add 点击失败: {e}")
+
+    if not clicked:
+        # 兜底: 用 page.evaluate 直接找 .article-cover-add 并 click
+        try:
+            page.evaluate("document.querySelector('.article-cover-add')?.click()")
+            print("JS 兜底点击 .article-cover-add")
+            clicked = True
+        except:
+            pass
+
+    if not clicked:
+        print("⚠ 未找到 .article-cover-add，使用坐标兜底")
         page.mouse.click(640, 280)
-        print("绝对兜底 (640,280)")
     time.sleep(3)
 
     # ========== 步骤 2：面板中找「免费正版图片」 ==========
