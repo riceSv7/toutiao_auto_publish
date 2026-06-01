@@ -162,31 +162,48 @@ def _click_publish(page: Page) -> None:
                 print("已点击确定")
                 time.sleep(2)
 
-            # 处理可能出现的蓝色弹窗（如声明原创、添加位置等）
-            time.sleep(1)
-            # 常见弹窗中的确认按钮
-            extra_popup_buttons = [
+            # 处理各种可能的后续弹窗（自动同步、声明原创、推荐设置等）
+            time.sleep(2)  # 等弹窗完全加载
+            popup_buttons = [
+                # 精准匹配"我知道了"的各种写法
+                'button:has-text("我知道了")',
+                'span:has-text("我知道了")',
+                'div[role="button"]:has-text("我知道了")',
+                '.byte-modal button:has-text("我知道了")',
+                # 其他常见确认按钮
                 'button:has-text("确定")',
                 'button:has-text("发布")',
-                'button:has-text("保存")',
-                'button:has-text("知道了")',
-                'button:has-text("关闭")',
                 'button:has-text("暂不")',
                 'button:has-text("跳过")',
-                '.byte-modal button:has-text("确定")',
-                '.muse-dialog button:has-text("确定")',
+                'button:has-text("关闭")',
+                'button:has-text("保存")',
             ]
-            for btn_sel in extra_popup_buttons:
+            for btn_sel in popup_buttons:
+                try:
+                    btn = page.locator(btn_sel).first
+                    if btn.is_visible(timeout=3000):
+                        btn.click()
+                        print(f"额外点击了弹窗按钮: {btn_sel}")
+                        time.sleep(1)
+                        # 有些弹窗点完一个还会出一个，继续循环
+                        break
+                except:
+                    pass
+
+            # 如果上面点到了，再等一秒看有没有新弹窗，再扫一次
+            time.sleep(1)
+            for btn_sel in popup_buttons:
                 try:
                     btn = page.locator(btn_sel).first
                     if btn.is_visible(timeout=2000):
                         btn.click()
-                        print(f"额外点击了弹窗按钮: {btn_sel}")
+                        print(f"再次点击弹窗按钮: {btn_sel}")
                         time.sleep(1)
+                        break
                 except:
                     pass
 
-            # 再按一次 ESC 尝试关闭
+            # 最后尝试按 ESC
             page.keyboard.press("Escape")
             time.sleep(0.5)
 
