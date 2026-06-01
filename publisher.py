@@ -108,6 +108,85 @@ def _fill_body(page: Page, body: str) -> None:
     print(f"正文已填入（{len(paragraphs)} 段）")
 
 
+def _is_cover_already_set(page: Page) -> bool:
+    """检测封面是否已经设置好了（已有图片显示），如果是则跳过封面上传流程"""
+    time.sleep(1)
+    # 检查页面中是否存在已设置的封面图
+    checks = [
+        # 封面区域内的 img 标签且已经加载
+        "document.querySelector('[class*=\"cover\"] img') !== null",
+        # 封面容器内含有 src 属性的图片
+        "document.querySelector('[class*=\"cover\"] img[src]') !== null",
+        # 某些头条版本中封面是 background-image
+        """() => {
+            const el = document.querySelector('[class*=\"cover\"]');
+            if (!el) return false;
+            const bg = window.getComputedStyle(el).backgroundImage;
+            return bg && bg !== 'none' && bg.includes('url');
+        }""",
+        # 封面预览区域（class 含 preview 或 show 的图片）
+        "document.querySelector('[class*=\"preview\"] img[src]') !== null",
+    ]
+    for js_code in checks:
+        try:
+            if page.evaluate(js_code):
+                print("检测到封面已设置，跳过封面上传步骤")
+                return True
+        except:
+            continue
+
+    # 额外检查：看页面上有没有 text=添加封面，如果没有（只有编辑封面），说明已经有封面了
+    try:
+        add_btn = page.locator('text=添加封面').first
+        if not add_btn.is_visible(timeout=1000):
+            # "添加封面"按钮不可见，但可能存在"编辑封面"或"更换封面"
+            edit_btn = page.locator('text=编辑封面').first
+            change_btn = page.locator('text=更换封面').first
+            has_edit = edit_btn.is_visible(timeout=500) if edit_btn.count() else False
+            has_change = change_btn.is_visible(timeout=500) if change_btn.count() else False
+            if has_edit or has_change:
+                print("检测到封面已设置（有编辑封面按钮），跳过封面上传步骤")
+                return True
+    except:
+        pass
+
+    return False
+
+
+def _dismiss_cover_panel(page: Page) -> None:
+    """关闭可能打开的封面上传/选择面板"""
+    time.sleep(1)
+    # 1. 按 ESC 键关闭
+    page.keyboard.press("Escape")
+    time.sleep(0.5)
+    # 2. 点击页面空白区域（正文编辑器的上方标题附近）
+    try:
+        title_input = page.locator('input[placeholder*="标题"]').first
+        if title_input.is_visible(timeout=1000):
+            # 点击标题旁边的空白区域
+            box = title_input.bounding_box()
+            if box:
+                page.mouse.click(box['x'] + box['width'] + 50, box['y'] + box['height'] / 2)
+                time.sleep(0.5)
+    except:
+        pass
+    # 3. JS 强制关闭所有 modal/drawer
+    page.evaluate("""
+        () => {
+            // 关闭所有 byte-modal
+            document.querySelectorAll('.byte-modal').forEach(m => m.style.display = 'none');
+            // 关闭所有 drawer
+            document.querySelectorAll('.byte-drawer').forEach(d => d.style.display = 'none');
+            // 关闭所有遮罩层
+            document.querySelectorAll('.byte-modal-mask, .byte-drawer-mask').forEach(m => m.style.display = 'none');
+            // 移除 body 上的 overflow hidden
+            document.body.style.overflow = '';
+        }
+    """)
+    time.sleep(0.5)
+    print("已尝试关闭封面上传面板")
+
+
 def _set_cover(page: Page) -> None:
     """
     强制点击封面区域，并处理弹出的上传/选择界面。
@@ -124,6 +203,10 @@ def _set_cover(page: Page) -> None:
     cover_file = "cover.jpg"
     if not os.path.isfile(cover_file):
         print(f"未找到封面文件 {cover_file}")
+        return
+
+    # ★ 关键：检测封面是否已经设置好了，如果是则直接跳过
+    if _is_cover_already_set(page):
         return
 
     # 先尝试直接通过 JS 找隐藏的 file input 并上传（最高优先级）
@@ -157,6 +240,9 @@ def _set_cover(page: Page) -> None:
                 # 点击后可能出现上传面板，尝试找文件输入
                 if _try_upload_after_click(page, cover_file):
                     return
+                # 如果上传失败，关闭可能打开的面板
+                _dismiss_cover_panel(page)
+                return  # 无论是否上传成功，都不再继续尝试其他策略
         except:
             continue
 
@@ -173,6 +259,8 @@ def _set_cover(page: Page) -> None:
             time.sleep(2)
             if _try_upload_after_click(page, cover_file):
                 return
+            _dismiss_cover_panel(page)
+            return
     except:
         pass
 
