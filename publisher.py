@@ -108,6 +108,28 @@ def _fill_body(page: Page, body: str) -> None:
     print(f"正文已填入（{len(paragraphs)} 段）")
 
 
+def _set_cover(page: Page) -> None:
+    """尝试点击默认封面或确认封面设置"""
+    cover_buttons = [
+        'button:has-text("默认封面")',
+        'button:has-text("生成封面")',
+        'span:has-text("默认封面")',
+        '.cover-default',              # 可能的选择器
+        '[class*="cover"] [class*="default"]',
+    ]
+    for sel in cover_buttons:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=3000):
+                btn.click()
+                print(f"已点击封面按钮: {sel}")
+                time.sleep(1)
+                return
+        except:
+            continue
+    print("未找到默认封面按钮，尝试跳过封面步骤...")
+
+
 def _click_publish(page: Page) -> None:
     publish_selectors = [
         'button:has-text("发布")',
@@ -210,6 +232,9 @@ def publish(title: str, body: str) -> None:
             time.sleep(0.5)
             _fill_body(page, body)
             time.sleep(1)
+
+            # 3.5 设置封面
+            _set_cover(page)
 
             # 4. 点击发布
             _click_publish(page)
