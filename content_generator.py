@@ -16,7 +16,8 @@ TOPICS = ["职场心得", "中年感悟", "情感故事", "生活智慧"]
 USER_MESSAGE_TEMPLATE = (
     "请生成一篇今日可发布的短文，主题从{}里随机选一个。"
     "输出格式要求：第一行为文章标题（以「# 」开头），"
-    "空一行后为正文，正文纯文本不使用 markdown。"
+    "空一行后为正文。正文必须是纯文本段落，不得出现任何 Markdown 标记（包括但不限于 **、*、#、>、-、1. 等）。"
+    "正文内部不得再出现以 # 开头的行。"
 )
 
 
@@ -40,7 +41,8 @@ def generate_article(api_key: str, max_retries: int = 3) -> tuple[str, str]:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_message},
         ],
-        "temperature": 0.8,
+        "temperature": 0.75,
+        "max_tokens": 800,
     }
 
     last_error = None
@@ -58,13 +60,15 @@ def generate_article(api_key: str, max_retries: int = 3) -> tuple[str, str]:
             content = data["choices"][0]["message"]["content"]
 
             title, body = _parse_content(content)
+            if not title or not body:
+                raise ValueError("标题或正文为空")
             return title, body
 
         except requests.HTTPError as e:
             last_error = e
             status = e.response.status_code if e.response is not None else "?"
             print(f"[尝试 {attempt}/{max_retries}] HTTP {status}：{e}")
-        except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
+        except (requests.RequestException, KeyError, json.JSONDecodeError,ValueError) as e:
             last_error = e
             print(f"[尝试 {attempt}/{max_retries}] 请求异常：{e}")
 
@@ -76,6 +80,8 @@ def generate_article(api_key: str, max_retries: int = 3) -> tuple[str, str]:
 
 
 def _parse_content(raw: str) -> tuple[str, str]:
+    if not raw or not raw.strip():
+        raise ValueError("API 返回内容为空")
     """从 API 返回文本中提取标题和正文。"""
     lines = raw.strip().split("\n")
 
@@ -94,10 +100,22 @@ def _parse_content(raw: str) -> tuple[str, str]:
         body_start += 1
 
     body = "\n".join(lines[body_start:]).strip()
-
+    import re
+    body = re.sub(r"[*#>`\-]", "", body)  # 简单粗暴，如果只想去掉符号
+    # 或者用更优雅的：去掉行首的 Markdown 符号
+    body = "\n".join(
+    re.sub(r"^(\s*[#>*\-]+\s*|\d+\.\s*)", "", line)
+    for line in body.split("\n")
+)
+   if not title:
+    # 尝试寻找第一个非空且长度合适的行作为标题
+    for line in lines:
+        if line.strip() and len(line.strip()) >= 5:
+            title = line.strip()
+            body_start = lines.index(line) + 1
+            break
+    # 如果还找不到，强制取第一行
     if not title:
-        # 整段文本没有 # 标题时，取第一行作为标题
         title = lines[0].strip()
-        body = "\n".join(lines[1:]).strip()
-
-    return title, body
+        body_start = 1
+    body = "\n".join(lines[body_start:]).strip()
