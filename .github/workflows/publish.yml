@@ -37,3 +37,10 @@ jobs:
         with:
           name: toutiao-screenshots
           path: "*.png"
+
+      - name: 上传调试截图
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: toutiao-screenshots
+          path: "*.png"
