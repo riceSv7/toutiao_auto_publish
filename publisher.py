@@ -253,221 +253,150 @@ def _dismiss_cover_panel(page: Page) -> None:
 
 def _set_cover(page: Page) -> None:
     """
-    强制点击封面区域，并处理弹出的上传/选择界面。
-    使用坐标点击和多种选择器兜底。
+    点击封面 + 号 → 选「免费正版图片」→ 选第一张图片。
+    纯点击流，不依赖本地文件。
     """
     # 等待页面稳定
     time.sleep(2)
     page.wait_for_load_state("networkidle")
     time.sleep(1)
 
-    # 再次确保没有弹窗遮挡
+    # 确保没有弹窗遮挡
     _close_popups(page)
-
-    cover_file = "cover.jpg"
-    if not os.path.isfile(cover_file):
-        print(f"未找到封面文件 {cover_file}")
-        return
 
     # ★ 关键：检测封面是否已经设置好了，如果是则直接跳过
     if _is_cover_already_set(page):
         return
 
-    # 先尝试直接通过 JS 找隐藏的 file input 并上传（最高优先级）
-    if _upload_via_hidden_input(page, cover_file):
-        return
-
-    # 策略1：寻找任何与封面相关的可点击元素（.article-cover-add 优先，实测为头条 + 号按钮）
-    click_targets = [
-        '.article-cover-add',         # ★ 实测头条封面的 + 号按钮
-        'text=添加封面',
-        'text=上传封面',
-        'text=编辑封面',
-        'text=封面',
-        '[class*="cover"]:has-text("添加")',
-        '[class*="cover"]:has-text("上传")',
-        '.article-cover',
-        '.cover-wrapper',
-        '[class*="cover-upload"]',
-        '[class*="coverImage"]',
-        '[class*="cover"] img',
-    ]
-
-    for target in click_targets:
+    # ========== 第一步：点击封面区域的 + 号按钮 ==========
+    cover_add_btn = page.locator('.article-cover-add').first
+    if cover_add_btn.count() == 0:
+        # 兜底：用坐标点击（正文编辑器上方约 60px）
         try:
-            el = page.locator(target).first
-            if el.is_visible(timeout=2000):
-                el.scroll_into_view_if_needed()
-                time.sleep(0.3)
-                el.click()
-                print(f"点击了封面元素: {target}")
-                time.sleep(2)
-                # 点击后可能出现上传面板，尝试找文件输入
-                if _try_upload_after_click(page, cover_file):
-                    return
-                # 如果上传失败，关闭可能打开的面板
-                _dismiss_cover_panel(page)
-                return  # 无论是否上传成功，都不再继续尝试其他策略
+            editor = page.locator('[contenteditable="true"]').first
+            if editor.count() > 0:
+                box = editor.bounding_box()
+                if box:
+                    page.mouse.click(box['x'] + box['width'] / 2, box['y'] - 60)
+                    print("坐标点击了封面区域")
+                    time.sleep(2)
         except:
-            continue
-
-    # 策略2：用坐标点击正文编辑器的上方区域（封面通常在那里）
-    try:
-        editor = page.locator('[contenteditable="true"]').first
-        box = editor.bounding_box()
-        if box:
-            # 点击正文编辑器上方约100像素处
-            x = box['x'] + box['width'] / 2
-            y = box['y'] - 60
-            page.mouse.click(x, y)
-            print(f"坐标点击封面区域 ({x},{y})")
-            time.sleep(2)
-            if _try_upload_after_click(page, cover_file):
-                return
-            _dismiss_cover_panel(page)
-            return
-    except:
-        pass
-
-    # 策略3：再次尝试默认封面按钮
-    try:
-        page.locator('button:has-text("默认封面")').first.click(timeout=2000)
-        print("点击了默认封面按钮")
+            pass
+    else:
+        cover_add_btn.scroll_into_view_if_needed()
+        time.sleep(0.3)
+        cover_add_btn.click()
+        print("✅ 点击了封面 + 号按钮 (.article-cover-add)")
         time.sleep(2)
-        return
-    except:
-        pass
 
-    # 全部失败，保存截图用于调试
-    screenshot_path = f"cover_fail_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-    page.screenshot(path=screenshot_path, full_page=True)
-    print(f"未能设置封面，调试截图已保存: {screenshot_path}")
-
-
-def _upload_via_hidden_input(page: Page, cover_file: str) -> bool:
-    """
-    通过 JS 直接查找页面中隐藏的 type=file 输入框并上传。
-    头条的上传控件通常是隐藏的 input[type=file]，由点击触发。
-    """
-    # 用 JS 查找所有隐藏的 file input
-    result = page.evaluate("""
-        () => {
-            const inputs = document.querySelectorAll('input[type="file"]');
-            const infos = [];
-            for (const input of inputs) {
-                const rect = input.getBoundingClientRect();
-                const style = window.getComputedStyle(input);
-                infos.push({
-                    id: input.id,
-                    name: input.name,
-                    class: input.className,
-                    accept: input.accept,
-                    visible: rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden',
-                    rect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height },
-                    parentTag: input.parentElement ? input.parentElement.tagName : null,
-                    parentClass: input.parentElement ? input.parentElement.className : null,
-                });
-            }
-            return JSON.stringify(infos);
-        }
-    """)
-    print(f"页面中的 file input: {result}")
-
-    # 方案A: 用 JS 直接触发隐藏的 file input（先找 accept 含 image 的）
-    upload_success = page.evaluate("""
-        (coverFileName) => {
-            // 找所有 file input，优先找 accept 含 image 的
-            const inputs = document.querySelectorAll('input[type="file"]');
-            let target = null;
-
-            // 优先找 accept 含 image 的
-            for (const input of inputs) {
-                if (input.accept && input.accept.includes('image')) {
-                    target = input;
-                    break;
-                }
-            }
-            // 其次取第一个
-            if (!target && inputs.length > 0) {
-                target = inputs[0];
-            }
-
-            if (target) {
-                // 移除 data 传输限制，让 Playwright 接管
-                return 'FOUND:' + (target.id || 'no-id');
-            }
-            return 'NOT_FOUND';
-        }
-    """, os.path.basename(cover_file))
-
-    if upload_success.startswith('FOUND:'):
-        # 用 Playwright 的 set_input_files 设置文件（即使隐藏也能工作）
-        try:
-            # 尝试找 accept 含 image 的
-            for sel in ['input[type="file"][accept*="image"]', 'input[type="file"]']:
-                file_input = page.locator(sel).first
-                if file_input.count() > 0:
-                    # 直接用 Playwright 设置，不需要 visible
-                    file_input.set_input_files(cover_file)
-                    print(f"已通过隐藏 input 上传封面图: {cover_file}")
-                    time.sleep(3)
-
-                    # 上传后可能需要点击"确定"或"完成"
-                    for confirm in ['button:has-text("确定")', 'button:has-text("完成")', 'span:has-text("确定")']:
-                        try:
-                            btn = page.locator(confirm).first
-                            if btn.is_visible(timeout=2000):
-                                btn.click()
-                                print(f"点击了封面确认按钮: {confirm}")
-                                time.sleep(1)
-                                break
-                        except:
-                            pass
-                    return True
-        except Exception as e:
-            print(f"隐藏 input 上传失败: {e}")
-
-    return False
-
-
-def _try_upload_after_click(page: Page, cover_file: str) -> bool:
-    """在点击封面区域后，尝试寻找文件上传控件并上传"""
-    time.sleep(1)
-
-    # 先试试直接用 JS 找隐藏 file input 上传
-    if _upload_via_hidden_input(page, cover_file):
-        return True
-
-    # 用 Playwright 的 locator（不检查可见性）
-    file_input_selectors = [
-        'input[type="file"][accept*="image"]',
-        'input[type="file"]',
+    # ========== 第二步：在弹出面板中点击「免费正版图片」==========
+    free_selectors = [
+        'text=免费正版图片',
+        'span:has-text("免费正版图片")',
+        'div:has-text("免费正版图片")',
+        '[class*="tab"]:has-text("免费正版")',
+        'text=正版图片',
     ]
-    for sel in file_input_selectors:
+    free_clicked = False
+    for sel in free_selectors:
         try:
-            file_input = page.locator(sel).first
-            if file_input.count() > 0:
-                # set_input_files 不需要元素可见
-                file_input.set_input_files(cover_file)
-                print(f"已上传封面图: {cover_file}")
-                time.sleep(3)
-                # 上传后可能需要点击"确定"或"完成"
-                for confirm in ['button:has-text("确定")', 'button:has-text("完成")']:
-                    try:
-                        btn = page.locator(confirm).first
-                        if btn.is_visible(timeout=2000):
-                            btn.click()
-                            print(f"点击了封面确认按钮: {confirm}")
-                            time.sleep(1)
-                            break
-                    except:
-                        pass
-                return True
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=3000):
+                btn.click()
+                print(f"✅ 点击了「免费正版图片」(选择器: {sel})")
+                time.sleep(2)
+                free_clicked = True
+                break
         except:
             continue
 
-    print("点击封面区域后未找到文件上传控件")
-    return False
+    if not free_clicked:
+        print("⚠ 未找到「免费正版图片」按钮，尝试直接选图...")
+
+    # ========== 第三步：选择第一张免费图片 ==========
+    # 等待图片列表加载
+    time.sleep(2)
+
+    # 尝试多种方式选择第一张图片
+    image_selectors = [
+        '.image-item:first-child img',
+        '.image-item:first-child',
+        '.cover-image-item:first-child img',
+        '.cover-image-item:first-child',
+        '[class*="image-list"] img:first-child',
+        '[class*="image-list"] [class*="item"]:first-child',
+        '[class*="image-list"] [class*="item"]:first-child img',
+        '[class*="cover-list"] img:first-child',
+        '[class*="cover-list"] [class*="item"]:first-child',
+        '[class*="pic"] img:first-child',
+        '.byte-image:first-child',
+        'img[src*="toutiao"]',  # 头条图库的图片
+    ]
+    img_clicked = False
+    for sel in image_selectors:
+        try:
+            img = page.locator(sel).first
+            if img.count() > 0 and img.is_visible(timeout=2000):
+                img.scroll_into_view_if_needed()
+                time.sleep(0.3)
+                img.click()
+                print(f"✅ 点击了封面图片 (选择器: {sel})")
+                time.sleep(1)
+                img_clicked = True
+                break
+        except:
+            continue
+
+    # 如果以上都失败，用 JS 直接找并点击第一张可见图片
+    if not img_clicked:
+        result = page.evaluate("""
+            () => {
+                const imgs = document.querySelectorAll('img[src]');
+                for (const img of imgs) {
+                    const style = window.getComputedStyle(img);
+                    const rect = img.getBoundingClientRect();
+                    if (rect.width > 50 && rect.height > 50 && style.display !== 'none' && style.visibility !== 'hidden') {
+                        // 跳过图标和小图
+                        if (rect.width < 200 || rect.height < 150) continue;
+                        if (img.src.includes('avatar') || img.src.includes('icon') || img.src.includes('logo')) continue;
+                        img.click();
+                        return 'CLICKED:' + img.src.substring(0, 80);
+                    }
+                }
+                return 'NOT_FOUND';
+            }
+        """)
+        if result.startswith('CLICKED:'):
+            print(f"✅ JS 点击了封面图片: {result}")
+            img_clicked = True
+        else:
+            print("⚠ 未找到可选封面图片")
+
+    # ========== 第四步：确认选择（如有确认按钮）==========
+    if img_clicked:
+        time.sleep(1)
+        confirm_selectors = [
+            'button:has-text("确定")',
+            'button:has-text("完成")',
+            'span:has-text("确定")',
+            'button:has-text("设为封面")',
+            '.byte-btn-primary:has-text("确定")',
+            '.byte-btn-primary:has-text("完成")',
+        ]
+        for sel in confirm_selectors:
+            try:
+                btn = page.locator(sel).first
+                if btn.is_visible(timeout=2000):
+                    btn.click()
+                    print(f"✅ 点击确认按钮 (选择器: {sel})")
+                    time.sleep(1)
+                    break
+            except:
+                continue
+
+    # 关闭可能残留的面板
+    _dismiss_cover_panel(page)
+    print("封面设置流程完成")
 
 
 def _click_publish(page: Page) -> None:
