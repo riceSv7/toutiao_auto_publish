@@ -323,60 +323,73 @@ def _dump_cover_ui(page: Page) -> None:
 
 def _set_cover(page: Page) -> None:
     """
-    点击封面 + 号 → 在弹出的上传面板中选「免费正版图片」→ 选第一张图片。
-    真实头条编辑器的封面区在正文上方，点击「添加封面」触发上传面板。
+    封面布局（用户提供）：
+      展示封面
+      单图 | 三图 | 无封面 | [加号大框] | 预览
+    加号在「无封面」和「预览」之间，单图/三图正下方。
+    策略：以「无封面」为锚点找右侧加号大框。
     """
     time.sleep(2)
     page.wait_for_load_state("networkidle")
     time.sleep(1)
     _close_popups(page)
 
-    # ★ 打印封面区域诊断信息
-    _dump_cover_ui(page)
-
-    # ★ 检测封面是否已设置
     if _is_cover_already_set(page):
         return
 
-    # ========== 步骤 0：点击「添加封面」触发上传面板 ==========
-    # 头条编辑器页面上最明显的封面触发器是"添加封面"文字
-    clicked_trigger = False
-    trigger_selectors = [
-        'text=添加封面',
-        'span:has-text("添加封面")',
-        'div:has-text("添加封面")',
-        '.article-cover-add',
-        '[class*="cover-add"]',
-        '[class*="cover"] [class*="add"]',
-    ]
-    for sel in trigger_selectors:
-        try:
-            el = page.locator(sel).first
-            if el.count() > 0 and el.is_visible(timeout=3000):
-                el.scroll_into_view_if_needed()
-                time.sleep(0.3)
-                el.click()
-                print(f"✅ 步骤0：点击封面触发器 ({sel})")
-                time.sleep(2)
-                clicked_trigger = True
-                break
-        except:
-            continue
+    # ★ 诊断：打印封面区域 DOM
+    _dump_cover_ui(page)
+    time.sleep(3)  # 等待封面组件异步加载
+    _dump_cover_ui(page)
 
-    if not clicked_trigger:
-        # JS 兜底：找含"添加封面"文字的可见元素并点击
-        page.evaluate("""
-            () => {
-                const all = [...document.querySelectorAll('*')];
-                const el = all.find(e => e.textContent?.trim() === '添加封面' && e.offsetParent !== null);
-                if (el) { el.click(); return true; }
-                return false;
-            }
-        """)
-        print("JS 兜底点击「添加封面」")
-        time.sleep(2)
+    # ========== 步骤1：以「无封面」为锚点找右侧加号 ==========
+    print("封面流程：以「无封面」为锚点找加号大框...")
+    click_result = page.evaluate("""
+        () => {
+            // 找「无封面」文本元素
+            const all = [...document.querySelectorAll('*')];
+            const noCover = all.find(e => (e.textContent||'').trim()==='无封面' && e.offsetParent && e.children.length<=1);
+            if (!noCover) return JSON.stringify({status:'NO_ANCHOR'});
+            const ar = noCover.getBoundingClientRect();
+            // 在「无封面」右侧找候选：left在ar.right+5到ar.right+350, top在ar.top-30到ar.bottom+80
+            const candidates = all.filter(e => {
+                if (!e.offsetParent || e===noCover || e.contains(noCover)) return false;
+                const r = e.getBoundingClientRect();
+                return r.left>=ar.right+5 && r.right<=ar.right+350 && r.top>=ar.top-30 && r.bottom<=ar.bottom+80 && r.width>30 && r.height>30;
+            }).map(e => {
+                const r = e.getBoundingClientRect(); const txt = (e.textContent||'').trim();
+                const isPlus = txt==='' || txt==='+' || txt==='＋' || e.tagName==='A' || (e.className||'').includes('add') || (e.className||'').includes('cover');
+                return {tag:e.tagName, cls:(e.className||'').substring(0,60), txt:txt.substring(0,20), w:Math.round(r.w), h:Math.round(r.h), x:Math.round(r.x), y:Math.round(r.y), plus:isPlus};
+            });
+            if (!candidates.length) return JSON.stringify({status:'NO_CANDIDATES'});
+            // 选最像加号的：尺寸>50x50 且距离最近
+            candidates.sort((a,b) => a.x - b.x);
+            const best = candidates.find(c => c.plus && c.w>50 && c.h>50) || candidates.find(c => c.plus) || candidates[0];
+            // 点击
+            const clickEl = all.find(e => {
+                const r = e.getBoundingClientRect();
+                return Math.round(r.x)===best.x && Math.round(r.y)===best.y;
+            });
+            if (clickEl) { clickEl.scrollIntoView({block:'center'}); clickEl.click(); }
+            return JSON.stringify({status:clickEl?'CLICKED':'FAILED', best, candidates});
+        }
+    """)
+    print(f"锚点定位结果: {click_result}")
+    try:
+        res = json.loads(click_result)
+        if res.get('status') != 'CLICKED':
+            # 坐标兜底: 正文编辑器上方80px, 偏右450px
+            editor = page.locator('[contenteditable="true"]').first
+            box = editor.bounding_box()
+            if box:
+                page.mouse.click(box['x']+450, box['y']-80)
+                print(f"坐标兜底加号 ({box['x']+450}, {box['y']-80})")
+    except:
+        page.mouse.click(640, 280)
+        print("绝对兜底 (640,280)")
+    time.sleep(3)
 
-    # ========== 步骤 1：面板弹出来了，找「免费正版图片」 ==========
+    # ========== 步骤 2：面板中找「免费正版图片」 ==========
     # 面板中可能有 Tab 标签切换，找"免费正版图片"或"正版图库"等
     free_selectors = [
         'text=免费正版图片',
@@ -430,7 +443,7 @@ def _set_cover(page: Page) -> None:
         """)
         print(f"[面板内容]\n{panel_html}")
 
-    # ========== 步骤 2：选第一张图片 ==========
+    # ========== 步骤 3：选第一张图片 ==========
     time.sleep(3)  # 等图片列表加载完
 
     img_clicked = False
@@ -496,7 +509,7 @@ def _set_cover(page: Page) -> None:
             print(f"⚠ 步骤2：所有策略都未找到可选图片。JS结果: {result}")
             page.screenshot(path=f"cover_no_img_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
 
-    # ========== 步骤 3：确认 ==========
+    # ========== 步骤 4：确认 ==========
     if img_clicked:
         time.sleep(1)
         confirm_selectors = [
