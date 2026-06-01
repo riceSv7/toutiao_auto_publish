@@ -110,59 +110,103 @@ def _fill_body(page: Page, body: str) -> None:
 
 def _set_cover(page: Page) -> None:
     """
-    通过 <input type="file"> 直接上传本地图片作为封面。
-    这是最稳定的封面设置方式，不依赖默认封面按钮。
+    强制点击封面区域，并处理弹出的上传/选择界面。
+    使用坐标点击和多种选择器兜底。
     """
-    cover_file = "cover.jpg"  # 放在项目根目录的封面图文件名
+    # 等待页面稳定
+    time.sleep(2)
+    page.wait_for_load_state("networkidle")
+    time.sleep(1)
+
+    # 再次确保没有弹窗遮挡
+    _close_popups(page)
+
+    cover_file = "cover.jpg"
     if not os.path.isfile(cover_file):
-        print(f"未找到封面文件 {cover_file}，跳过封面设置")
+        print(f"未找到封面文件 {cover_file}")
         return
 
-    # 头条封面区域的文件上传选择器（多种可能）
+    # 策略1：寻找任何与封面相关的可点击元素，包括纯文本
+    click_targets = [
+        'text=添加封面',
+        'text=上传封面',
+        'text=编辑封面',
+        'text=封面',
+        '[class*="cover"]:has-text("添加")',
+        '[class*="cover"]:has-text("上传")',
+        '.article-cover',
+        '.cover-wrapper',
+        '[class*="cover-upload"]',
+        '[class*="coverImage"]',
+        '[class*="cover"] img',  # 可能已有封面图，点击替换
+    ]
+
+    for target in click_targets:
+        try:
+            el = page.locator(target).first
+            if el.is_visible(timeout=2000):
+                el.click()
+                print(f"点击了封面元素: {target}")
+                time.sleep(2)
+                # 点击后可能出现上传面板，尝试找文件输入
+                _try_upload_after_click(page, cover_file)
+                return
+        except:
+            continue
+
+    # 策略2：用坐标点击正文编辑器的上方区域（封面通常在那里）
+    try:
+        editor = page.locator('[contenteditable="true"]').first
+        box = editor.bounding_box()
+        if box:
+            # 点击正文编辑器上方约100像素处
+            x = box['x'] + box['width'] / 2
+            y = box['y'] - 60
+            page.mouse.click(x, y)
+            print(f"坐标点击封面区域 ({x},{y})")
+            time.sleep(2)
+            _try_upload_after_click(page, cover_file)
+            return
+    except:
+        pass
+
+    # 策略3：再次尝试默认封面按钮
+    try:
+        page.locator('button:has-text("默认封面")').first.click(timeout=2000)
+        print("点击了默认封面按钮")
+        time.sleep(2)
+        return
+    except:
+        pass
+
+    print("未能设置封面，可能封面区域未被任何选择器命中")
+
+
+def _try_upload_after_click(page: Page, cover_file: str) -> None:
+    """在点击封面区域后，尝试寻找文件上传控件并上传"""
     file_input_selectors = [
         'input[type="file"][accept*="image"]',
-        '.cover-upload input[type="file"]',
-        '.article-cover input[type="file"]',
         'input[type="file"]',
     ]
     for sel in file_input_selectors:
         try:
             file_input = page.locator(sel).first
             if file_input.is_visible(timeout=2000):
-                # 先清空可能已存在的封面
-                try:
-                    remove_btn = page.locator('.cover-remove, [class*="remove"]').first
-                    if remove_btn.is_visible(timeout=1000):
-                        remove_btn.click()
-                        time.sleep(0.5)
-                except:
-                    pass
-
-                # 使用 set_input_files 上传本地图片
                 file_input.set_input_files(cover_file)
                 print(f"已上传封面图: {cover_file}")
                 time.sleep(2)
+                # 上传后可能需要点击"确定"或"完成"
+                for confirm in ['button:has-text("确定")', 'button:has-text("完成")']:
+                    try:
+                        page.locator(confirm).first.click(timeout=2000)
+                        print("点击了封面确认按钮")
+                        time.sleep(1)
+                    except:
+                        pass
                 return
         except:
             continue
-
-    # 如果找不到文件上传控件，再走默认封面兜底
-    cover_buttons = [
-        'button:has-text("默认封面")',
-        'button:has-text("生成封面")',
-        'span:has-text("默认封面")',
-    ]
-    for sel in cover_buttons:
-        try:
-            btn = page.locator(sel).first
-            if btn.is_visible(timeout=3000):
-                btn.click()
-                print(f"已点击封面按钮: {sel}")
-                time.sleep(1)
-                return
-        except:
-            continue
-    print("未能设置封面，可能会发布失败")
+    print("点击封面区域后未找到文件上传控件")
 
 
 def _click_publish(page: Page) -> None:
