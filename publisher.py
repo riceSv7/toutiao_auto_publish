@@ -21,15 +21,15 @@ def _load_cookies() -> list[dict]:
 
 
 def _close_popups(page: Page) -> None:
-    """关闭页面上的广告弹窗、活动对话框等遮挡元素"""
+    """关闭页面上的广告弹窗、AI 助手抽屉等遮挡元素"""
     # 1. 尝试点击常见的关闭按钮
     close_selectors = [
-        '.byte-modal-close',           # 弹窗关闭按钮
-        '[class*="close"]',            # 包含 close 的元素
-        'svg[class*="close"]',         # SVG 关闭图标
-        '.modal-close',                # 通用模态框关闭
-        '[aria-label="关闭"]',         # 无障碍标签
-        '[aria-label="Close"]',        # 英文无障碍标签
+        '.byte-modal-close',
+        '[class*="close"]',
+        'svg[class*="close"]',
+        '.modal-close',
+        '[aria-label="关闭"]',
+        '[aria-label="Close"]',
     ]
     for sel in close_selectors:
         try:
@@ -41,11 +41,29 @@ def _close_popups(page: Page) -> None:
         except:
             pass
 
-    # 2. 按 ESC 键尝试关闭弹窗
+    # 2. 关闭 AI 助手抽屉（byte-drawer）
+    drawer_close_selectors = [
+        '.ai-assistant-drawer .byte-drawer-close',
+        '.byte-drawer-wrapper .byte-drawer-close',
+        '.ai-assistant-drawer [class*="close"]',
+        '.byte-drawer-mask',            # 点击遮罩层通常可关闭抽屉
+    ]
+    for sel in drawer_close_selectors:
+        try:
+            el = page.locator(sel).first
+            if el.is_visible(timeout=2000):
+                el.click()
+                print(f"已关闭 AI 抽屉（选择器: {sel}）")
+                time.sleep(1)
+                break
+        except:
+            pass
+
+    # 3. 按 ESC 键作为保底关闭
     page.keyboard.press("Escape")
     time.sleep(0.5)
 
-    # 3. 如果页面顶部有大 banner 图遮挡，尝试滚动一点距离
+    # 4. 向下滚动一点，避开顶部 banner 遮挡
     page.evaluate("window.scrollBy(0, 100)")
     time.sleep(0.5)
 
