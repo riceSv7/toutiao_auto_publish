@@ -126,6 +126,10 @@ def _set_cover(page: Page) -> None:
         print(f"未找到封面文件 {cover_file}")
         return
 
+    # 先尝试直接通过 JS 找隐藏的 file input 并上传（最高优先级）
+    if _upload_via_hidden_input(page, cover_file):
+        return
+
     # 策略1：寻找任何与封面相关的可点击元素，包括纯文本
     click_targets = [
         'text=添加封面',
@@ -145,12 +149,14 @@ def _set_cover(page: Page) -> None:
         try:
             el = page.locator(target).first
             if el.is_visible(timeout=2000):
+                el.scroll_into_view_if_needed()
+                time.sleep(0.3)
                 el.click()
                 print(f"点击了封面元素: {target}")
                 time.sleep(2)
                 # 点击后可能出现上传面板，尝试找文件输入
-                _try_upload_after_click(page, cover_file)
-                return
+                if _try_upload_after_click(page, cover_file):
+                    return
         except:
             continue
 
@@ -165,8 +171,8 @@ def _set_cover(page: Page) -> None:
             page.mouse.click(x, y)
             print(f"坐标点击封面区域 ({x},{y})")
             time.sleep(2)
-            _try_upload_after_click(page, cover_file)
-            return
+            if _try_upload_after_click(page, cover_file):
+                return
     except:
         pass
 
@@ -179,11 +185,107 @@ def _set_cover(page: Page) -> None:
     except:
         pass
 
-    print("未能设置封面，可能封面区域未被任何选择器命中")
+    # 全部失败，保存截图用于调试
+    screenshot_path = f"cover_fail_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    page.screenshot(path=screenshot_path, full_page=True)
+    print(f"未能设置封面，调试截图已保存: {screenshot_path}")
 
 
-def _try_upload_after_click(page: Page, cover_file: str) -> None:
+def _upload_via_hidden_input(page: Page, cover_file: str) -> bool:
+    """
+    通过 JS 直接查找页面中隐藏的 type=file 输入框并上传。
+    头条的上传控件通常是隐藏的 input[type=file]，由点击触发。
+    """
+    # 用 JS 查找所有隐藏的 file input
+    result = page.evaluate("""
+        () => {
+            const inputs = document.querySelectorAll('input[type="file"]');
+            const infos = [];
+            for (const input of inputs) {
+                const rect = input.getBoundingClientRect();
+                const style = window.getComputedStyle(input);
+                infos.push({
+                    id: input.id,
+                    name: input.name,
+                    class: input.className,
+                    accept: input.accept,
+                    visible: rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden',
+                    rect: { top: rect.top, left: rect.left, width: rect.width, height: rect.height },
+                    parentTag: input.parentElement ? input.parentElement.tagName : null,
+                    parentClass: input.parentElement ? input.parentElement.className : null,
+                });
+            }
+            return JSON.stringify(infos);
+        }
+    """)
+    print(f"页面中的 file input: {result}")
+
+    # 方案A: 用 JS 直接触发隐藏的 file input（先找 accept 含 image 的）
+    upload_success = page.evaluate("""
+        (coverFileName) => {
+            // 找所有 file input，优先找 accept 含 image 的
+            const inputs = document.querySelectorAll('input[type="file"]');
+            let target = null;
+
+            // 优先找 accept 含 image 的
+            for (const input of inputs) {
+                if (input.accept && input.accept.includes('image')) {
+                    target = input;
+                    break;
+                }
+            }
+            // 其次取第一个
+            if (!target && inputs.length > 0) {
+                target = inputs[0];
+            }
+
+            if (target) {
+                // 移除 data 传输限制，让 Playwright 接管
+                return 'FOUND:' + (target.id || 'no-id');
+            }
+            return 'NOT_FOUND';
+        }
+    """, os.path.basename(cover_file))
+
+    if upload_success.startswith('FOUND:'):
+        # 用 Playwright 的 set_input_files 设置文件（即使隐藏也能工作）
+        try:
+            # 尝试找 accept 含 image 的
+            for sel in ['input[type="file"][accept*="image"]', 'input[type="file"]']:
+                file_input = page.locator(sel).first
+                if file_input.count() > 0:
+                    # 直接用 Playwright 设置，不需要 visible
+                    file_input.set_input_files(cover_file)
+                    print(f"已通过隐藏 input 上传封面图: {cover_file}")
+                    time.sleep(3)
+
+                    # 上传后可能需要点击"确定"或"完成"
+                    for confirm in ['button:has-text("确定")', 'button:has-text("完成")', 'span:has-text("确定")']:
+                        try:
+                            btn = page.locator(confirm).first
+                            if btn.is_visible(timeout=2000):
+                                btn.click()
+                                print(f"点击了封面确认按钮: {confirm}")
+                                time.sleep(1)
+                                break
+                        except:
+                            pass
+                    return True
+        except Exception as e:
+            print(f"隐藏 input 上传失败: {e}")
+
+    return False
+
+
+def _try_upload_after_click(page: Page, cover_file: str) -> bool:
     """在点击封面区域后，尝试寻找文件上传控件并上传"""
+    time.sleep(1)
+
+    # 先试试直接用 JS 找隐藏 file input 上传
+    if _upload_via_hidden_input(page, cover_file):
+        return True
+
+    # 用 Playwright 的 locator（不检查可见性）
     file_input_selectors = [
         'input[type="file"][accept*="image"]',
         'input[type="file"]',
@@ -191,22 +293,28 @@ def _try_upload_after_click(page: Page, cover_file: str) -> None:
     for sel in file_input_selectors:
         try:
             file_input = page.locator(sel).first
-            if file_input.is_visible(timeout=2000):
+            if file_input.count() > 0:
+                # set_input_files 不需要元素可见
                 file_input.set_input_files(cover_file)
                 print(f"已上传封面图: {cover_file}")
-                time.sleep(2)
+                time.sleep(3)
                 # 上传后可能需要点击"确定"或"完成"
                 for confirm in ['button:has-text("确定")', 'button:has-text("完成")']:
                     try:
-                        page.locator(confirm).first.click(timeout=2000)
-                        print("点击了封面确认按钮")
-                        time.sleep(1)
+                        btn = page.locator(confirm).first
+                        if btn.is_visible(timeout=2000):
+                            btn.click()
+                            print(f"点击了封面确认按钮: {confirm}")
+                            time.sleep(1)
+                            break
                     except:
                         pass
-                return
+                return True
         except:
             continue
+
     print("点击封面区域后未找到文件上传控件")
+    return False
 
 
 def _click_publish(page: Page) -> None:
