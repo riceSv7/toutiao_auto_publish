@@ -162,6 +162,34 @@ def _click_publish(page: Page) -> None:
                 print("已点击确定")
                 time.sleep(2)
 
+            # 处理可能出现的蓝色弹窗（如声明原创、添加位置等）
+            time.sleep(1)
+            # 常见弹窗中的确认按钮
+            extra_popup_buttons = [
+                'button:has-text("确定")',
+                'button:has-text("发布")',
+                'button:has-text("保存")',
+                'button:has-text("知道了")',
+                'button:has-text("关闭")',
+                'button:has-text("暂不")',
+                'button:has-text("跳过")',
+                '.byte-modal button:has-text("确定")',
+                '.muse-dialog button:has-text("确定")',
+            ]
+            for btn_sel in extra_popup_buttons:
+                try:
+                    btn = page.locator(btn_sel).first
+                    if btn.is_visible(timeout=2000):
+                        btn.click()
+                        print(f"额外点击了弹窗按钮: {btn_sel}")
+                        time.sleep(1)
+                except:
+                    pass
+
+            # 再按一次 ESC 尝试关闭
+            page.keyboard.press("Escape")
+            time.sleep(0.5)
+
             return
         except PlaywrightTimeout:
             continue
