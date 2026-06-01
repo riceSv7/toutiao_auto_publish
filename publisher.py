@@ -406,83 +406,142 @@ def _try_upload_after_click(page: Page, cover_file: str) -> bool:
 
 
 def _click_publish(page: Page) -> None:
-    publish_selectors = [
-        'button:has-text("发布")',
-        'button:has-text("提交")',
-        '[class*="publish"]:has-text("发布")',
-        'button:has-text("确认发布")',
-        'button:has-text("发表")',
-        '.publish-btn',
+    """
+    点击发布按钮。
+    头条的流程是：在编辑页面点击"预览并发布" → 弹出预览对话框 → 在对话框中点击"发布"。
+    """
+    # ========== 第一步：点击"预览并发布"按钮（编辑页面上的主按钮） ==========
+    preview_publish_selectors = [
+        'button:has-text("预览并发布")',
+        'span:has-text("预览并发布")',
+        '[class*="preview"]:has-text("发布")',
+        'text=预览并发布',
     ]
 
-    for sel in publish_selectors:
+    found_preview = False
+    for sel in preview_publish_selectors:
         try:
             btn = page.locator(sel).first
-            btn.wait_for(state="visible", timeout=3000)
-            btn.click()
-            print(f"点击了按钮（选择器: {sel}）")
-            time.sleep(2)
-
-            # 处理可能的二次确认弹窗
-            confirm = page.locator('button:has-text("确认发布")').first
-            if confirm.is_visible(timeout=2000):
-                confirm.click()
-                print("已点击确认发布")
-                time.sleep(2)
-
-            # 处理"确定"按钮
-            confirm2 = page.locator('button:has-text("确定")').first
-            if confirm2.is_visible(timeout=2000):
-                confirm2.click()
-                print("已点击确定")
-                time.sleep(2)
-
-            # 处理"我知道了"等弹窗（使用 JS 强制点击，绕过遮挡和超时）
-            time.sleep(2)
-            js_click_button_texts = [
-                "我知道了",
-                "确定",
-                "发布",
-                "暂不",
-                "跳过",
-                "关闭",
-                "保存",
-            ]
-            for text in js_click_button_texts:
-                try:
-                    page.evaluate(f"""
-                        () => {{
-                            const buttons = [...document.querySelectorAll('button, span, div[role="button"]')];
-                            const target = buttons.find(el => el.innerText.includes('{text}'));
-                            if (target) {{
-                                target.click();
-                                return true;
-                            }}
-                            return false;
-                        }}
-                    """)
-                    time.sleep(0.5)
-                except:
-                    pass
-
-            # 最后再按 ESC 清除残留
-            page.keyboard.press("Escape")
-            time.sleep(0.5)
-
-            return
-        except PlaywrightTimeout:
+            if btn.is_visible(timeout=3000):
+                btn.scroll_into_view_if_needed()
+                time.sleep(0.3)
+                btn.click()
+                print(f"点击了「预览并发布」（选择器: {sel}）")
+                time.sleep(3)
+                found_preview = True
+                break
+        except:
             continue
 
-    # 所有选择器都未命中，打印 HTML 调试
-    print("ERROR: 未找到发布按钮，打印页面 HTML（前 3000 字符）...")
-    html = page.content()
-    print(html[:3000])
+    if not found_preview:
+        # 如果没有"预览并发布"按钮，尝试直接找"发布"按钮（老版本或特殊情况）
+        for sel in ['button:has-text("发布")', 'button:has-text("提交")']:
+            try:
+                btn = page.locator(sel).first
+                if btn.is_visible(timeout=3000):
+                    btn.scroll_into_view_if_needed()
+                    btn.click()
+                    print(f"直接点击了「发布」（选择器: {sel}）")
+                    time.sleep(3)
+                    break
+            except:
+                continue
 
-    screenshot_path = f"debug_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-    page.screenshot(path=screenshot_path, full_page=True)
-    print(f"调试截图已保存: {screenshot_path}")
+    # ========== 第二步：在预览/发布对话框中点击真正的"发布"按钮 ==========
+    time.sleep(1)
 
-    raise RuntimeError("未找到发布按钮，已输出页面 HTML 和截图")
+    # 在对话框中找发布按钮（多种可能性）
+    dialog_publish_selectors = [
+        '.byte-modal button:has-text("发布")',
+        '.byte-dialog button:has-text("发布")',
+        'button:has-text("确认发布")',
+        'button:has-text("发布")',
+        '[class*="dialog"] button:has-text("发布")',
+    ]
+    for sel in dialog_publish_selectors:
+        try:
+            btn = page.locator(sel).first
+            if btn.is_visible(timeout=3000):
+                btn.click()
+                print(f"在对话框中点击了发布（选择器: {sel}）")
+                time.sleep(2)
+                break
+        except:
+            continue
+
+    # ========== 第三步：处理后续的各种弹窗 ==========
+    time.sleep(2)
+
+    # 使用 JS 点击各类确认弹窗按钮
+    js_click_button_texts = [
+        "我知道了",
+        "确定",
+        "确认发布",
+        "发布",
+        "暂不",
+        "跳过",
+        "关闭",
+        "保存",
+        "完成",
+    ]
+    for text in js_click_button_texts:
+        try:
+            clicked = page.evaluate(f"""
+                () => {{
+                    const buttons = [...document.querySelectorAll('button, span, div[role="button"], a')];
+                    const target = buttons.find(el => el.innerText.trim() === '{text}' || el.innerText.includes('{text}'));
+                    if (target) {{
+                        target.click();
+                        return true;
+                    }}
+                    return false;
+                }}
+            """)
+            if clicked:
+                print(f"JS 点击了按钮: {text}")
+                time.sleep(1)
+        except:
+            pass
+
+    # 最后再按 ESC 清除残留弹窗
+    page.keyboard.press("Escape")
+    time.sleep(0.5)
+    page.keyboard.press("Escape")
+    time.sleep(0.5)
+
+    # ========== 第四步：验证是否成功（检测成功提示） ==========
+    success_hints = ["发布成功", "已发布", "提交成功", "操作成功"]
+    content = page.content()
+    for hint in success_hints:
+        if hint in content:
+            print(f"检测到发布成功提示: {hint}")
+            return
+
+    print("发布操作完成，等待后续确认...")
+
+
+def _click_publish_fallback(page: Page) -> None:
+    """备用：使用 JS 直接查找并点击页面中所有可能的发布按钮"""
+    clicked = page.evaluate("""
+        () => {
+            const texts = ['预览并发布', '发布', '确认发布', '提交'];
+            const allElements = [...document.querySelectorAll('button, span, a, div')];
+            for (const text of texts) {
+                const target = allElements.find(el =>
+                    el.innerText.trim() === text || el.innerText.includes(text)
+                );
+                if (target) {
+                    target.click();
+                    return text;
+                }
+            }
+            return null;
+        }
+    """)
+    if clicked:
+        print(f"JS 备用点击: {clicked}")
+    else:
+        print("JS 备用未找到任何发布按钮")
 
 
 def _wait_for_success(page: Page, timeout: int = 30) -> str:
