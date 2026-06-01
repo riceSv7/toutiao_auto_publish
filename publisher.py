@@ -3,9 +3,18 @@ import os
 import time
 from datetime import datetime
 
+try:
+    import pyperclip
+    _HAS_PYPERCLIP = True
+except ImportError:
+    pyperclip = None  # type: ignore
+    _HAS_PYPERCLIP = False
+
 from playwright.sync_api import sync_playwright, Page, TimeoutError as PlaywrightTimeout
 
 PUBLISH_URL = "https://mp.toutiao.com/profile_v4/graphic/publish"
+
+HEADLESS = os.environ.get("HEADLESS", "true").lower() == "true"
 
 
 def _load_cookies() -> list[dict]:
@@ -69,12 +78,14 @@ def _close_popups(page: Page) -> None:
 
 
 def _fill_title(page: Page, title: str) -> None:
-    # 头条编辑器标题栏 —— 多种可能选择器
+    # 头条编辑器标题栏 —— 多种可能选择器（textarea 优先，实际 DOM 为 textarea）
     selectors = [
+        'textarea[placeholder*="标题"]',
         'input[placeholder*="标题"]',
         '[data-placeholder*="标题"]',
-        'textarea[placeholder*="标题"]',
         ".title-input input",
+        ".title-input textarea",
+        "textarea",  # 最后兜底：找任意 textarea
     ]
     for sel in selectors:
         el = page.locator(sel).first
@@ -88,24 +99,77 @@ def _fill_title(page: Page, title: str) -> None:
 
 
 def _fill_body(page: Page, body: str) -> None:
-    editor = page.locator('[contenteditable="true"]').first
+    """使用 ProseMirror 编辑器 API 填入正文，兼容头条的富文本编辑器"""
+    editor = page.locator('.ProseMirror[contenteditable="true"]').first
+    # 兜底：如果 ProseMirror 选择器没找到，回退到通用 contenteditable
+    if editor.count() == 0:
+        editor = page.locator('[contenteditable="true"]').first
     editor.wait_for(state="visible", timeout=10000)
     editor.click()
     time.sleep(0.5)
 
-    # 清空可能已有的占位内容
+    paragraphs = [p.strip() for p in body.split("\n") if p.strip()]
+    if not paragraphs:
+        print("警告：正文为空，跳过填入")
+        return
+
+    # 先用 JS 通过 ProseMirror 内部 API 直接设置内容（更可靠）
+    try:
+        escaped_paragraphs = [p.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n") for p in paragraphs]
+        js_paragraphs = "', '".join(escaped_paragraphs)
+        result = page.evaluate(f"""
+            () => {{
+                const editor = document.querySelector('.ProseMirror');
+                if (!editor || !editor.__vue__) {{
+                    // 尝试通过 DOM 事件触发
+                    return 'NO_VUE';
+                }}
+                try {{
+                    const view = editor.__vue__.$el ? editor.__vue__ : null;
+                    return 'HAS_VUE_BUT_NO_DIRECT_API';
+                }} catch(e) {{
+                    return 'ERROR:' + e.message;
+                }}
+            }}
+        """)
+        print(f"ProseMirror 检测结果: {result}")
+    except Exception as e:
+        print(f"ProseMirror JS 检测异常: {e}")
+
+    # 方案A：清空 + 逐段用 keyboard.type 输入
     page.keyboard.press("Control+a")
     page.keyboard.press("Backspace")
-    time.sleep(0.2)
+    time.sleep(0.3)
 
-    paragraphs = [p.strip() for p in body.split("\n") if p.strip()]
     for i, para in enumerate(paragraphs):
-        page.keyboard.type(para)
+        page.keyboard.type(para, delay=10)  # 加点延迟避免输入太快丢失
         if i < len(paragraphs) - 1:
             page.keyboard.press("Enter")
-        time.sleep(0.2)
+            time.sleep(0.3)
+        time.sleep(0.3)
 
     print(f"正文已填入（{len(paragraphs)} 段）")
+
+    # 方案B（兜底）：如果内容未成功填入，用 clipboard + paste
+    time.sleep(1)
+    actual_text = page.evaluate("""
+        () => {
+            const editor = document.querySelector('.ProseMirror');
+            return editor ? editor.textContent.trim() : '';
+        }
+    """)
+    if len(actual_text) < 10:
+        print(f"正文填入可能失败（当前长度={len(actual_text)}），尝试剪贴板方案...")
+        try:
+            pyperclip.copy(body)
+            page.keyboard.press("Control+v")
+            time.sleep(1)
+            actual_text2 = page.evaluate("document.querySelector('.ProseMirror')?.textContent?.trim() || ''")
+            print(f"剪贴板方案后正文长度: {len(actual_text2)}")
+        except Exception as e:
+            print(f"剪贴板方案失败: {e}")
+    else:
+        print(f"正文验证通过（长度={len(actual_text)}）")
 
 
 def _is_cover_already_set(page: Page) -> bool:
@@ -213,8 +277,9 @@ def _set_cover(page: Page) -> None:
     if _upload_via_hidden_input(page, cover_file):
         return
 
-    # 策略1：寻找任何与封面相关的可点击元素，包括纯文本
+    # 策略1：寻找任何与封面相关的可点击元素（.article-cover-add 优先，实测为头条 + 号按钮）
     click_targets = [
+        '.article-cover-add',         # ★ 实测头条封面的 + 号按钮
         'text=添加封面',
         'text=上传封面',
         'text=编辑封面',
@@ -225,7 +290,7 @@ def _set_cover(page: Page) -> None:
         '.cover-wrapper',
         '[class*="cover-upload"]',
         '[class*="coverImage"]',
-        '[class*="cover"] img',  # 可能已有封面图，点击替换
+        '[class*="cover"] img',
     ]
 
     for target in click_targets:
@@ -412,9 +477,12 @@ def _click_publish(page: Page) -> None:
     """
     # ========== 第一步：点击"预览并发布"按钮（编辑页面上的主按钮） ==========
     preview_publish_selectors = [
+        'button.publish-btn',                       # ★ 实测头条发布按钮 class
+        'button.publish-btn-last',                  # ★ 实测备选
         'button:has-text("预览并发布")',
         'span:has-text("预览并发布")',
         '[class*="preview"]:has-text("发布")',
+        '[class*="publish"]:has-text("发布")',
         'text=预览并发布',
     ]
 
@@ -574,7 +642,7 @@ def publish(title: str, body: str) -> None:
     cookies = _load_cookies()
 
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
+        browser = pw.chromium.launch(headless=HEADLESS)
         context = browser.new_context(locale="zh-CN")
         page = context.new_page()
 
@@ -598,15 +666,28 @@ def publish(title: str, body: str) -> None:
             time.sleep(0.5)
             _fill_body(page, body)
             time.sleep(1)
+            # 保存填写完成截图
+            screenshot_after_fill = f"step1_filled_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            page.screenshot(path=screenshot_after_fill, full_page=True)
+            print(f"填写完成截图: {screenshot_after_fill}")
 
             # 3.5 设置封面
             _set_cover(page)
+            time.sleep(1)
+            # 保存封面设置后截图
+            screenshot_after_cover = f"step2_cover_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            page.screenshot(path=screenshot_after_cover, full_page=True)
+            print(f"封面设置后截图: {screenshot_after_cover}")
 
             # 4. 点击发布
             _click_publish(page)
 
             # 5. 等待成功并截图
-            _wait_for_success(page)
+            result_path = _wait_for_success(page)
+            if "success" not in result_path:
+                print(f"⚠ 未检测到明确成功提示，请检查截图: {result_path}")
+            else:
+                print(f"✅ 发布成功！截图: {result_path}")
 
         finally:
             context.close()
