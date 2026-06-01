@@ -109,13 +109,48 @@ def _fill_body(page: Page, body: str) -> None:
 
 
 def _set_cover(page: Page) -> None:
-    """尝试点击默认封面或确认封面设置"""
+    """
+    通过 <input type="file"> 直接上传本地图片作为封面。
+    这是最稳定的封面设置方式，不依赖默认封面按钮。
+    """
+    cover_file = "cover.jpg"  # 放在项目根目录的封面图文件名
+    if not os.path.isfile(cover_file):
+        print(f"未找到封面文件 {cover_file}，跳过封面设置")
+        return
+
+    # 头条封面区域的文件上传选择器（多种可能）
+    file_input_selectors = [
+        'input[type="file"][accept*="image"]',
+        '.cover-upload input[type="file"]',
+        '.article-cover input[type="file"]',
+        'input[type="file"]',
+    ]
+    for sel in file_input_selectors:
+        try:
+            file_input = page.locator(sel).first
+            if file_input.is_visible(timeout=2000):
+                # 先清空可能已存在的封面
+                try:
+                    remove_btn = page.locator('.cover-remove, [class*="remove"]').first
+                    if remove_btn.is_visible(timeout=1000):
+                        remove_btn.click()
+                        time.sleep(0.5)
+                except:
+                    pass
+
+                # 使用 set_input_files 上传本地图片
+                file_input.set_input_files(cover_file)
+                print(f"已上传封面图: {cover_file}")
+                time.sleep(2)
+                return
+        except:
+            continue
+
+    # 如果找不到文件上传控件，再走默认封面兜底
     cover_buttons = [
         'button:has-text("默认封面")',
         'button:has-text("生成封面")',
         'span:has-text("默认封面")',
-        '.cover-default',              # 可能的选择器
-        '[class*="cover"] [class*="default"]',
     ]
     for sel in cover_buttons:
         try:
@@ -127,7 +162,7 @@ def _set_cover(page: Page) -> None:
                 return
         except:
             continue
-    print("未找到默认封面按钮，尝试跳过封面步骤...")
+    print("未能设置封面，可能会发布失败")
 
 
 def _click_publish(page: Page) -> None:
