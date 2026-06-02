@@ -362,16 +362,33 @@ def _set_cover(page: Page) -> None:
         return
     time.sleep(3)
 
-    # 步骤 2：在主页面 DOM 的 modal 面板中搜索并点击图片
-    print("[封面] 步骤2 - 在素材面板中搜索并选择图片...")
-    img_clicked = _click_cover_image_in_modal(page)
+    # 步骤 2：弹窗已打开，直接用 JS 点击第一张可见图片
+    print("[封面] 步骤2 - 弹窗内选图...")
+    img_clicked = False
+    try:
+        page.wait_for_selector('.byte-modal img', state='visible', timeout=5000)
+        time.sleep(2)
+        page.evaluate("() => { const imgs = document.querySelectorAll('.byte-modal img'); for (const img of imgs) { if (img.offsetParent !== null) { img.click(); break; } } }")
+        print("[封面] 已点击弹窗内第一张图片")
+        time.sleep(2)
+        img_clicked = True
+    except Exception as e:
+        print(f"[封面] 弹窗内选图失败: {e}")
 
     # 步骤 3：没找到图片 → 尝试先用关键词搜索
     if not img_clicked:
         print("[封面] 步骤3 - 未直接找到图片，尝试关键词搜索...")
         _search_cover_image(page, keywords=["情感", "深夜", "女性", "婚姻", "伤感"])
         time.sleep(2)
-        img_clicked = _click_cover_image_in_modal(page)
+        try:
+            page.wait_for_selector('.byte-modal img', state='visible', timeout=5000)
+            time.sleep(2)
+            page.evaluate("() => { const imgs = document.querySelectorAll('.byte-modal img'); for (const img of imgs) { if (img.offsetParent !== null) { img.click(); break; } } }")
+            print("[封面] 搜索后已点击弹窗内第一张图片")
+            time.sleep(2)
+            img_clicked = True
+        except Exception as e:
+            print(f"[封面] 搜索后选图失败: {e}")
 
     # 步骤 4：终极兜底 —— JS 深度查找任意大尺寸图片
     if not img_clicked:
@@ -441,72 +458,63 @@ def _ensure_single_image_checked(page: Page) -> None:
 
 def _click_cover_add_button(page: Page) -> bool:
     """
-    点击封面 + 号按钮打开素材面板。
-    头条「展示封面」区域中有一个 + 号预览方框，点击后弹出素材弹窗。
+    终极方案：使用键盘 Tab 键逐步聚焦到封面添加按钮，然后按 Enter 打开。
+    需要预先知道从页面顶部到封面按钮需要按多少次 Tab。
+    如果不知道，先用默认值尝试，并在日志中打印当前聚焦元素。
     """
-    add_selectors = [
-        # 根据你的页面描述，最可能的选择器
-        'text=预览',
-        'text="+"',
-        'button:has-text("预览")',
-        'span:has-text("预览")',
-        'div[class*="cover"] >> text=预览',
-        'div[class*="cover"] >> text="+"',
-        # 保留原有的兜底选择器
-        '.article-cover-add',
-        '[class*="cover-add"]',
-        '[class*="cover"] [class*="add"]',
-        '[class*="cover"] [class*="plus"]',
-        '[class*="cover"] .add-btn',
-        'text=添加封面',
-    ]
-    for sel in add_selectors:
-        try:
-            el = page.locator(sel).first
-            if el.count() > 0 and el.is_visible(timeout=5000):
-                el.scroll_into_view_if_needed()
-                el.click(force=True)
-                print(f"[封面] 点击 + 号成功 ({sel})")
-                return True
-        except Exception as e:
-            print(f"[封面] {sel} 点击失败: {e}")
-
-    # JS 兜底 —— 找封面区域内的「+」按钮或上传入口
+    # 先确保焦点离开编辑器，点击页面顶部空白区域
     try:
-        result = page.evaluate("""
-            () => {
-                const all = document.querySelectorAll('[class*="cover"] [class*="add"], [class*="cover"] button, [class*="cover"] span');
-                for (const el of all) {
-                    if (el.offsetParent !== null && (el.textContent.trim() === '' || el.textContent.includes('+') || el.textContent.includes('添加') || el.textContent.includes('上传') || el.textContent.includes('预览'))) {
-                        el.click();
-                        return 'CLICKED:' + el.className;
-                    }
-                }
-                // 最后尝试找整个封面区域里第一个可见的空元素
-                const coverArea = document.querySelector('[class*="cover"]');
-                if (coverArea) {
-                    const imgs = coverArea.querySelectorAll('img[src]');
-                    if (imgs.length === 0) {
-                        // 空封面区域中找到一个大的空 div 点击
-                        const divs = coverArea.querySelectorAll('div');
-                        for (const d of divs) {
-                            const r = d.getBoundingClientRect();
-                            if (r.width > 100 && r.height > 100 && d.offsetParent !== null) {
-                                d.click();
-                                return 'CLICKED_BLANK_AREA';
-                            }
-                        }
-                    }
-                }
-                return 'NOT_FOUND';
-            }
-        """)
-        if result.startswith('CLICKED'):
-            print(f"[封面] JS 兜底点击 + 号成功 ({result})")
-            return True
-    except Exception as e:
-        print(f"[封面] JS 兜底点击 + 号失败: {e}")
+        page.locator('textarea[placeholder*="标题"]').first.click()
+        time.sleep(0.5)
+    except:
+        pass
 
+    # 尝试按 Tab 移动到封面区域（默认 8 次，根据实际情况调整）
+    tab_count = int(os.environ.get("COVER_TAB_COUNT", "8"))
+    print(f"[封面] 开始按 {tab_count} 次 Tab 键定位封面按钮...")
+
+    for i in range(tab_count):
+        page.keyboard.press("Tab")
+        time.sleep(0.2)
+        # 打印当前聚焦元素的信息，方便调试
+        focused_info = page.evaluate("""() => {
+            const el = document.activeElement;
+            if (!el) return 'no focus';
+            const tag = el.tagName.toLowerCase();
+            const text = (el.innerText || el.textContent || '').trim().substring(0, 30);
+            const cls = el.className ? el.className.toString() : '';
+            return `${tag} .${cls} text="${text}"`;
+        }""")
+        print(f"[封面] Tab {i+1}: {focused_info}")
+
+    # 按 Enter 键尝试打开
+    page.keyboard.press("Enter")
+    time.sleep(3)
+
+    # 检查是否打开了弹窗（出现 modal 或 drawer）
+    try:
+        modal = page.locator('.byte-modal, .muse-dialog, [class*="modal"]').first
+        if modal.is_visible(timeout=3000):
+            print("[封面] Tab 导航成功，素材弹窗已打开")
+            return True
+    except:
+        pass
+
+    # 如果默认次数不对，尝试多按几次 Tab 再 Enter
+    for extra in range(5):
+        page.keyboard.press("Tab")
+        time.sleep(0.2)
+        page.keyboard.press("Enter")
+        time.sleep(2)
+        try:
+            if page.locator('.byte-modal, .muse-dialog').first.is_visible(timeout=2000):
+                print(f"[封面] 额外 Tab {extra+1} 次后弹窗打开")
+                return True
+        except:
+            continue
+
+    print("[封面] Tab 导航未能打开弹窗")
+    page.screenshot(path=f"cover_tab_fail_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
     return False
 
 
