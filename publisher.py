@@ -461,7 +461,34 @@ def _click_cover_add_button(page: Page) -> bool:
             add_div.scroll_into_view_if_needed()
             add_div.click(force=True)
             print("[封面] 直接点击 .article-cover-add 成功")
-            time.sleep(2)
+            time.sleep(3)
+            # 诊断：dump 点击后页面上所有弹窗/面板元素
+            modal_info = page.evaluate("""
+                () => {
+                    const results = [];
+                    const selectors = ['modal', 'dialog', 'drawer', 'popup', 'panel', 'overlay'];
+                    for (const s of selectors) {
+                        const els = document.querySelectorAll('[class*="' + s + '"]');
+                        for (const el of els) {
+                            const rect = el.getBoundingClientRect();
+                            if (rect.width > 100 || rect.height > 100) {
+                                results.push({
+                                    tag: el.tagName.toLowerCase(),
+                                    cls: (el.className || '').toString().substring(0, 60),
+                                    text: (el.textContent || '').trim().substring(0, 80),
+                                    w: Math.round(rect.width),
+                                    h: Math.round(rect.height),
+                                    vis: el.offsetParent !== null
+                                });
+                            }
+                        }
+                    }
+                    return JSON.stringify(results, null, 2);
+                }
+            """)
+            print(f"[封面] 点击后弹窗诊断: {modal_info}")
+            # 截图看点击后的页面状态
+            page.screenshot(path=f"cover_after_click_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
             # 检查弹窗是否打开
             try:
                 if page.locator('.byte-modal, .muse-dialog, [class*="modal"]').first.is_visible(timeout=3000):
