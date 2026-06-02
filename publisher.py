@@ -113,7 +113,30 @@ def _fill_body(page: Page, body: str) -> None:
         print("警告：正文为空，跳过填入")
         return
 
-    # 清空 + 逐段用 keyboard.type 输入
+    # 先用 JS 通过 ProseMirror 内部 API 直接设置内容（更可靠）
+    try:
+        escaped_paragraphs = [p.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n") for p in paragraphs]
+        js_paragraphs = "', '".join(escaped_paragraphs)
+        result = page.evaluate(f"""
+            () => {{
+                const editor = document.querySelector('.ProseMirror');
+                if (!editor || !editor.__vue__) {{
+                    // 尝试通过 DOM 事件触发
+                    return 'NO_VUE';
+                }}
+                try {{
+                    const view = editor.__vue__.$el ? editor.__vue__ : null;
+                    return 'HAS_VUE_BUT_NO_DIRECT_API';
+                }} catch(e) {{
+                    return 'ERROR:' + e.message;
+                }}
+            }}
+        """)
+        print(f"ProseMirror 检测结果: {result}")
+    except Exception as e:
+        print(f"ProseMirror JS 检测异常: {e}")
+
+    # 方案A：清空 + 逐段用 keyboard.type 输入
     page.keyboard.press("Control+a")
     page.keyboard.press("Backspace")
     time.sleep(0.3)
@@ -201,48 +224,148 @@ def _is_cover_already_set(page: Page) -> bool:
 
 
 def _dismiss_cover_panel(page: Page) -> None:
-    """关闭可能打开的封面上传/选择面板 —— 只用安全方式，不销毁 modal DOM"""
+    """关闭可能打开的封面上传/选择面板 —— 多策略组合"""
     time.sleep(1)
-    # 1. 多次按 ESC 关闭（覆盖不同层级的弹窗）
-    for i in range(3):
+
+    # 1. JS 派发原生 MouseEvent 点击遮罩层（绕过 Playwright 点击拦截）
+    page.evaluate("""
+        () => {
+            const masks = document.querySelectorAll('.byte-drawer-mask, .byte-modal-mask');
+            for (const mask of masks) {
+                if (mask.offsetParent !== null) {
+                    const rect = mask.getBoundingClientRect();
+                    ['mousedown', 'mouseup', 'click'].forEach(name => {
+                        mask.dispatchEvent(new MouseEvent(name, {
+                            bubbles: true, cancelable: true,
+                            clientX: rect.left + 10, clientY: rect.top + 10, button: 0
+                        }));
+                    });
+                }
+            }
+        }
+    """)
+    time.sleep(0.5)
+
+    # 2. 按 ESC 多次（比之前更多，确保 Vue 响应）
+    for i in range(5):
         page.keyboard.press("Escape")
-        time.sleep(0.5)
-    # 2. 点击遮罩层（如果还存在且可见）
-    try:
-        mask = page.locator('.byte-modal-mask, .byte-drawer-mask').first
-        if mask.count() > 0 and mask.is_visible(timeout=1000):
-            mask.click()
-            time.sleep(0.5)
-    except:
-        pass
-    # 3. 点击面板自身的关闭按钮
+        time.sleep(0.4)
+
+    # 3. 点击 close 按钮
     try:
         close_sel = page.locator('.byte-modal-close, .byte-drawer-close, [aria-label="关闭"]').first
         if close_sel.count() > 0 and close_sel.is_visible(timeout=1000):
-            close_sel.click()
+            close_sel.click(force=True)
             time.sleep(0.5)
     except:
         pass
-    # 4. 点击页面边缘空白区域（正文编辑器上方标题附近）
-    try:
-        title_input = page.locator('textarea[placeholder*="标题"]').first
-        if title_input.count() > 0 and title_input.is_visible(timeout=1000):
-            box = title_input.bounding_box()
-            if box:
-                page.mouse.click(box['x'] + box['width'] + 50, box['y'] + box['height'] / 2)
-                time.sleep(0.5)
-    except:
-        pass
-    # 5. 最后确认面板是否真的关闭了
-    try:
-        still_open = page.locator('.byte-modal, .byte-drawer').first
-        if still_open.count() > 0 and still_open.is_visible(timeout=2000):
-            print("[!] 警告：封面面板可能未完全关闭，但继续执行")
-        else:
-            print("封面面板已关闭")
-    except:
-        print("已尝试关闭封面上传面板")
 
+    # 4. 隐藏所有遮挡元素（mask + wrapper，它们会拦截后续点击）
+    hidden_count = page.evaluate("""
+        () => {
+            let count = 0;
+            const els = document.querySelectorAll('.byte-drawer-mask, .byte-modal-mask, .byte-drawer-wrapper');
+            for (const el of els) {
+                if (el.offsetParent !== null) {
+                    el.style.display = 'none';
+                    count++;
+                }
+            }
+            return count;
+        }
+    """)
+    if hidden_count > 0:
+        print(f"封面遮挡层已强制隐藏 ({hidden_count}个)")
+
+    # 5. 确认面板是否真的关闭了
+    time.sleep(0.5)
+    still_open = page.evaluate("""
+        () => {
+            // 检查有没有仍可见的大尺寸抽屉或模态框
+            const els = document.querySelectorAll('.byte-drawer, .byte-modal');
+            for (const el of els) {
+                if (el.offsetParent !== null && window.getComputedStyle(el).display !== 'none') {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width > 200 && rect.height > 200) return true;
+                }
+            }
+            return false;
+        }
+    """)
+    if still_open:
+        print("[!] 警告：封面面板可能未完全关闭")
+    else:
+        print("封面面板已关闭")
+
+
+def _dump_cover_ui(page: Page) -> None:
+    """诊断日志：打印页面上与封面相关的真实 DOM 元素（帮助调试选择器）"""
+    time.sleep(1)
+    info = page.evaluate("""
+        () => {
+            function getPath(el) {
+                if (!el || el === document.body) return 'body';
+                let path = el.tagName.toLowerCase();
+                if (el.className && typeof el.className === 'string') path += '.' + el.className.split(' ').filter(c => c).join('.');
+                if (el.id) path += '#' + el.id;
+                return path;
+            }
+            const results = [];
+
+            // 1. 找所有 class 含 cover 的元素
+            const coverEls = document.querySelectorAll('[class*="cover"]');
+            coverEls.forEach(el => {
+                const rect = el.getBoundingClientRect();
+                results.push({
+                    type: 'cover_class',
+                    tag: getPath(el),
+                    text: (el.textContent || '').trim().substring(0, 80),
+                    width: Math.round(rect.width),
+                    height: Math.round(rect.height),
+                    x: Math.round(rect.x),
+                    y: Math.round(rect.y),
+                    visible: rect.width > 0 && rect.height > 0 && el.offsetParent !== null
+                });
+            });
+
+            // 2. 找所有含"封面"文字的元素
+            const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+            let node;
+            while (node = walker.nextNode()) {
+                if (!node.textContent) continue;
+                const txt = node.textContent.trim();
+                if ((txt.includes('封面') || txt.includes('正版') || txt.includes('图库')) && txt.length < 50) {
+                    results.push({
+                        type: 'text_match',
+                        tag: getPath(node),
+                        text: txt.substring(0, 80),
+                        visible: node.offsetParent !== null
+                    });
+                }
+            }
+
+            // 3. 所有可见 button（前20个）
+            const buttons = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null).slice(0, 20);
+            buttons.forEach(b => {
+                results.push({
+                    type: 'visible_button',
+                    tag: getPath(b),
+                    text: (b.textContent || '').trim().substring(0, 40)
+                });
+            });
+
+            // 4. 所有 iframe
+            const iframes = [...document.querySelectorAll('iframe')].map(f => ({
+                type: 'iframe',
+                src: (f.src || '').substring(0, 120),
+                visible: f.offsetParent !== null
+            }));
+            results.push(...iframes);
+
+            return JSON.stringify(results, null, 2);
+        }
+    """)
+    print(f"[封面诊断] \n{info}")
 
 
 def _set_cover(page: Page) -> None:
@@ -264,12 +387,15 @@ def _set_cover(page: Page) -> None:
     # 步骤 0：确保「单图」被选中
     print("[封面] 步骤0 - 确保「单图」单选被选中...")
     _ensure_single_image_checked(page)
+    time.sleep(1)
+    _dump_cover_ui(page)
     time.sleep(2)
 
     # 步骤 1：点击 + 号按钮打开素材面板
     print("[封面] 步骤1 - 点击 + 号打开素材面板...")
     if not _click_cover_add_button(page):
         print("[封面] 无法点击 + 号按钮，封面设置失败")
+        page.screenshot(path="cover_no_add_{}.png".format(datetime.now().strftime('%Y%m%d_%H%M%S')))
         return
     time.sleep(3)
 
@@ -286,8 +412,13 @@ def _set_cover(page: Page) -> None:
         _click_confirm_in_modal(page)
         time.sleep(2)
 
+    # 步骤 5：终极兜底 —— JS 深度查找任意大尺寸图片
+    if not img_clicked:
+        print("[封面] 步骤5 - 兜底：JS 深度搜索大尺寸图片...")
+
     if not img_clicked:
         print("[封面] 所有方式都未找到可选图片！")
+        page.screenshot(path="cover_no_img_{}.png".format(datetime.now().strftime('%Y%m%d_%H%M%S')))
 
     # 步骤 6：验证封面是否设置成功（图片选中后面板通常自动关闭）
     time.sleep(3)
@@ -305,6 +436,7 @@ def _set_cover(page: Page) -> None:
         print("[封面] 封面设置验证通过")
     else:
         print("[封面] 警告：封面可能未设置成功，继续流程...")
+        page.screenshot(path="cover_verify_fail_{}.png".format(datetime.now().strftime('%Y%m%d_%H%M%S')))
 
     print("[封面] 完成")
 
@@ -385,6 +517,33 @@ def _click_cover_add_button(page: Page) -> bool:
         print(f"[封面] JS 事件点击结果: {result}")
         time.sleep(3)
 
+        # 诊断：检查点击后是否有弹窗出现
+        modal_info = page.evaluate("""
+            () => {
+                const results = [];
+                const selectors = ['modal', 'dialog', 'drawer', 'popup', 'overlay', 'muse'];
+                for (const s of selectors) {
+                    const els = document.querySelectorAll('[class*="' + s + '"]');
+                    for (const el of els) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 200 || rect.height > 200) {
+                            results.push({
+                                tag: el.tagName.toLowerCase(),
+                                cls: (el.className || '').toString().substring(0, 80),
+                                text: (el.textContent || '').trim().substring(0, 80),
+                                w: Math.round(rect.width),
+                                h: Math.round(rect.height),
+                                vis: el.offsetParent !== null
+                            });
+                        }
+                    }
+                }
+                return JSON.stringify(results, null, 2);
+            }
+        """)
+        print(f"[封面] 点击后弹窗诊断: {modal_info}")
+        page.screenshot(path=f"cover_after_click_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+
         # 检查弹窗是否打开
         if page.locator('[class*="modal"]:visible, [class*="dialog"]:visible, [class*="drawer"]:visible').first.count() > 0:
             # 确认不是页面本身的 garr-panel
@@ -449,32 +608,276 @@ def _click_cover_add_button(page: Page) -> bool:
     return False
 
 
+def _click_cover_image_in_modal(page: Page) -> bool:
+    """
+    在主页面 DOM 的 modal 面板中搜索并点击第一张合适的封面图片。
+    封面素材面板是主页面内的弹窗（非 iframe），图片点击后自动选中。
+    """
+    # 等待弹窗出现，确保图片加载完成
+    try:
+        page.wait_for_selector('.byte-modal', state='visible', timeout=5000)
+        print("[封面] 弹窗已打开")
+    except:
+        print("[封面] 等待弹窗超时，继续尝试...")
+    time.sleep(2)  # 等图片加载
 
-def _switch_to_free_tab_in_modal(page: Page) -> bool:
-    """在素材弹窗内切换到「免费正版图片」tab"""
+    # 简化点击：直接点击弹窗内第一张可见的图片
+    first_img = page.locator('.byte-modal img').first
+    if first_img.count() > 0:
+        try:
+            first_img.click(force=True)
+            print("[封面] 已点击弹窗内第一张图片")
+            time.sleep(2)
+            return True
+        except Exception as e:
+            print(f"[封面] 点击弹窗内第一张图片失败: {e}")
+
+    # 先找「免费正版图片」tab 并确保选中
     free_tab_selectors = [
         'text=免费正版图片',
         'text=正版图片',
         'text=正版图库',
         'text=免费图片',
-        '[class*="tab"]:has-text("免费")',
+        '[class*="tab"]:has-text("免费正版")',
         '[class*="tab"]:has-text("正版")',
         '[role="tab"]:has-text("免费")',
-        'div:has-text("免费正版")',
-        'span:has-text("免费正版")',
+        '[class*="tab-item"]:has-text("免费")',
     ]
     for sel in free_tab_selectors:
         try:
             tab = page.locator(sel).first
             if tab.count() > 0 and tab.is_visible(timeout=3000):
-                tab.click()
-                print(f"[封面] 已切换到「免费正版图片」tab ({sel})")
-                time.sleep(2)
-                return True
+                # 确认它是否已经是选中状态（检查 class 是否有 active/selected）
+                is_active = page.evaluate("""
+                    (sel) => {
+                        try {
+                            const el = document.evaluate(
+                                "//*[contains(text(), '免费')]",
+                                document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null
+                            ).singleNodeValue;
+                            if (!el) return false;
+                            const parent = el.closest('[class*="tab"]') || el.parentElement;
+                            return parent && (parent.className.includes('active') || parent.className.includes('selected') || parent.getAttribute('aria-selected') === 'true');
+                        } catch(e) { return false; }
+                    }
+                """, sel)
+                if not is_active:
+                    tab.click()
+                    print(f"[封面] 已切换到「免费正版图片」tab ({sel})")
+                else:
+                    print(f"[封面] 「免费正版图片」tab 已处于选中状态")
+                time.sleep(1.5)
+                break
         except:
             continue
-    print("[封面] 未找到「免费正版图片」tab，假定已在正确 tab")
+
+    time.sleep(1.5)
+
+    # 在 modal 面板中找图片
+    img_selectors = [
+        # 卡片容器级别的选择器（包围 img 的可点击 div）
+        '[class*="card"]',
+        '[class*="item"]',
+        '[class*="list"] [class*="item"]',
+        '[class*="pic"]',
+        '[class*="image"]',
+        # 直接的 img 标签
+        'img[src]',
+        '[class*="card"] img',
+        '[class*="item"] img',
+    ]
+
+    for sel in img_selectors:
+        try:
+            items = page.locator(sel)
+            count = items.count()
+            if count == 0:
+                continue
+            for i in range(min(count, 20)):
+                el = items.nth(i)
+                if not el.is_visible(timeout=1000):
+                    continue
+                box = el.bounding_box()
+                if not box:
+                    continue
+
+                # 如果是 img 标签且尺寸合适
+                tag = page.evaluate(f"document.querySelectorAll('{sel}')[{i}]?.tagName?.toLowerCase() || ''")
+                if tag == 'img':
+                    if box['width'] < 80 or box['height'] < 60:
+                        continue
+                    src = el.get_attribute('src') or ''
+                    if any(s in src.lower() for s in ['avatar', 'icon', 'logo', 'favicon']):
+                        continue
+                else:
+                    # 卡片/容器元素：尺寸应该 >= 100x100
+                    if box['width'] < 100 or box['height'] < 100:
+                        continue
+                    # 确保里面有 img
+                    has_img = page.evaluate(f"""
+                        (idx) => {{
+                            const el = document.querySelectorAll('{sel}')[idx];
+                            if (!el) return false;
+                            const imgs = el.querySelectorAll('img');
+                            return imgs.length > 0;
+                        }}
+                    """, i)
+                    if not has_img:
+                        continue
+
+                # 可见且是图片/图片容器 → 可点击
+                el.scroll_into_view_if_needed()
+                time.sleep(0.2)
+                try:
+                    el.click(force=True)
+                    print(f"[封面] 点击素材图片 ({sel}[{i}], {box['width']}x{box['height']})")
+                    time.sleep(1.5)
+                    return True
+                except Exception as ce:
+                    print(f"[封面] {sel}[{i}] 点击失败: {ce}")
+                    continue
+        except Exception as e:
+            print(f"[封面] 选择器 {sel} 异常: {e}")
+            continue
+
+    # JS 兜底 —— 在所有可见 modal 中找大尺寸图片
+    try:
+        result = page.evaluate("""
+            () => {
+                // 只在可见的 modal/dialog/drawer 内查找
+                const containers = document.querySelectorAll('[class*="modal"]:not([class*="mask"]), [class*="drawer"], [class*="dialog"], [class*="popup"], [class*="panel"]');
+                let searchRoot = document.body;
+                for (const c of containers) {
+                    const style = window.getComputedStyle(c);
+                    if (style.display !== 'none' && style.visibility !== 'hidden') {
+                        const rect = c.getBoundingClientRect();
+                        if (rect.width > 300 && rect.height > 300) {
+                            searchRoot = c;
+                            break;
+                        }
+                    }
+                }
+                const imgs = searchRoot.querySelectorAll('img[src]');
+                for (const img of imgs) {
+                    const rect = img.getBoundingClientRect();
+                    if (rect.width >= 100 && rect.height >= 75 && img.offsetParent !== null) {
+                        const src = (img.src || '').toLowerCase();
+                        if (src.includes('avatar') || src.includes('icon') || src.includes('logo') || src.includes('favicon') || src.includes('data:')) continue;
+                        img.click();
+                        return 'CLICKED:' + rect.width + 'x' + rect.height + ' ' + src.substring(0, 60);
+                    }
+                }
+                // 也尝试找大尺寸的 div（可能是图片容器）
+                const divs = searchRoot.querySelectorAll('div');
+                for (const div of divs) {
+                    const rect = div.getBoundingClientRect();
+                    if (rect.width >= 150 && rect.height >= 120 && div.offsetParent !== null) {
+                        const childImgs = div.querySelectorAll('img');
+                        if (childImgs.length > 0) {
+                            div.click();
+                            return 'CLICKED_DIV:' + rect.width + 'x' + rect.height;
+                        }
+                    }
+                }
+                return 'NOT_FOUND';
+            }
+        """)
+        if result.startswith('CLICKED'):
+            print(f"[封面] JS 兜底选择图片 ({result})")
+            time.sleep(1)
+            return True
+    except Exception as e:
+        print(f"[封面] JS 兜底选图异常: {e}")
+
     return False
+
+
+def _upload_local_cover(page: Page) -> bool:
+    """在打开的抽屉中直接上传本地 cover.jpg"""
+    import os as _os
+    cover_path = _os.path.join(_os.path.dirname(__file__), "cover.jpg")
+    if not _os.path.exists(cover_path):
+        print(f"[封面] 本地图片不存在: {cover_path}")
+        return False
+
+    print(f"[封面] 准备上传: {cover_path}")
+
+    # 方法1：找到隐藏的 file input 直接传文件
+    try:
+        file_input = page.locator('input[type="file"]').first
+        if file_input.count() > 0:
+            file_input.set_input_files(cover_path)
+            print("[封面] 已选择本地文件，等待上传...")
+            time.sleep(5)
+            # 检查是否上传成功（看看页面有没有变化）
+            return True
+    except Exception as e:
+        print(f"[封面] file input 上传失败: {e}")
+
+    # 方法2：点击"本地上传"按钮触发文件选择
+    try:
+        upload_btn = page.locator('text=本地上传').first
+        if upload_btn.count() > 0 and upload_btn.is_visible(timeout=3000):
+            # 监听文件选择对话框
+            with page.expect_file_chooser() as fc_info:
+                upload_btn.click()
+            file_chooser = fc_info.value
+            file_chooser.set_files(cover_path)
+            print("[封面] 通过文件选择器上传")
+            time.sleep(5)
+            return True
+    except Exception as e:
+        print(f"[封面] 本地上传按钮失败: {e}")
+
+    # 方法3：找所有 file input（包括隐藏的）
+    try:
+        result = page.evaluate("""
+            (path) => {
+                const inputs = document.querySelectorAll('input[type="file"]');
+                if (inputs.length > 0) {
+                    // 返回找到的 input 信息
+                    const info = [];
+                    inputs.forEach((inp, i) => {
+                        info.push('input[' + i + ']: ' + (inp.className || '') + ' accept=' + (inp.accept || ''));
+                    });
+                    return JSON.stringify(info);
+                }
+                return 'no file inputs';
+            }
+        """, cover_path)
+        print(f"[封面] 页面 file inputs: {result}")
+    except:
+        pass
+
+    return False
+
+
+def _switch_to_free_tab_in_modal(page: Page) -> bool:
+    """在素材弹窗内切换到「免费正版图片」tab"""
+    # 使用 JS MouseEvent 直接点击 .byte-tabs-header-title 元素
+    result = page.evaluate("""
+        () => {
+            const titles = document.querySelectorAll('.byte-tabs-header-title');
+            for (const el of titles) {
+                if (el.textContent.trim() === '免费正版图片') {
+                    const rect = el.getBoundingClientRect();
+                    ['mousedown', 'mouseup', 'click'].forEach(name => {
+                        el.dispatchEvent(new MouseEvent(name, {
+                            bubbles: true, cancelable: true,
+                            clientX: rect.left + rect.width/2,
+                            clientY: rect.top + rect.height/2,
+                            button: 0
+                        }));
+                    });
+                    return 'CLICKED free tab';
+                }
+            }
+            return 'NOT_FOUND';
+        }
+    """)
+    print(f"[封面] 切换 tab: {result}")
+    time.sleep(2)
+    return 'CLICKED' in result
 
 
 def _search_and_click_image_in_modal(page: Page, keywords: list) -> bool:
@@ -494,6 +897,54 @@ def _search_and_click_image_in_modal(page: Page, keywords: list) -> bool:
         time.sleep(1)
     except:
         pass
+
+    # 诊断：检查 iframe、canvas、所有 img
+    dump = page.evaluate("""
+        () => {
+            const drawer = document.querySelector('.byte-drawer');
+            if (!drawer) return 'no drawer';
+            const results = [];
+
+            // 检查 iframe
+            const iframes = drawer.querySelectorAll('iframe');
+            results.push('iframes: ' + iframes.length);
+            iframes.forEach((f, i) => {
+                results.push('  iframe[' + i + '] src=' + (f.src || '').substring(0, 80) + ' ' + f.getBoundingClientRect().width + 'x' + f.getBoundingClientRect().height);
+            });
+
+            // 检查 canvas
+            const canvases = drawer.querySelectorAll('canvas');
+            results.push('canvases: ' + canvases.length);
+            canvases.forEach((c, i) => {
+                results.push('  canvas[' + i + '] ' + c.getBoundingClientRect().width + 'x' + c.getBoundingClientRect().height);
+            });
+
+            // 检查所有 img（包括 0x0 的）
+            const imgs = drawer.querySelectorAll('img');
+            results.push('all imgs: ' + imgs.length);
+            imgs.forEach((img, i) => {
+                const r = img.getBoundingClientRect();
+                const ns = img.naturalWidth || 0;
+                results.push('  img[' + i + ']: dom=' + r.width + 'x' + r.height + ' natural=' + ns + 'x' + (img.naturalHeight||0) + ' src=' + (img.src || '').substring(0, 80));
+            });
+
+            // 检查所有带 background-image 的元素
+            const all = drawer.querySelectorAll('*');
+            let bgCount = 0;
+            for (const el of all) {
+                const bg = window.getComputedStyle(el).backgroundImage;
+                if (bg && bg !== 'none' && bg.includes('url') && !bg.includes('data:')) {
+                    const r = el.getBoundingClientRect();
+                    results.push('  bg: ' + el.tagName + '.' + (el.className||'').substring(0,40) + ' ' + r.width + 'x' + r.height + ' ' + bg.substring(0, 80));
+                    bgCount++;
+                    if (bgCount >= 5) break;
+                }
+            }
+
+            return JSON.stringify(results);
+        }
+    """)
+    print(f"[封面] 抽屉内容诊断: {dump}")
 
     # 在抽屉内查找真实图片
     result = _find_and_click_image_in_container(page, '.byte-drawer')
@@ -520,38 +971,40 @@ def _find_and_click_image_in_container(page: Page, container_sel: str) -> bool:
             const container = document.querySelector(sel);
             if (!container) return 'no container';
 
-            // 先诊断第一个 IMG.btn.image-border 的父链
-            const firstImg = container.querySelector('IMG.btn.image-border') || container.querySelector('img[style*="background"]');
-            if (firstImg) {
-                let chain = [];
-                let p = firstImg;
-                for (let i = 0; i < 8 && p && p !== document.body; i++) {
-                    const r = p.getBoundingClientRect();
-                    chain.push(p.tagName + '.' + (p.className||'').substring(0,30) + ' ' + r.width + 'x' + r.height + ' cs=' + window.getComputedStyle(p).display);
-                    p = p.parentElement;
+            // 策略1: 点击 LI.item 元素（头条免费正版图库使用 LI.item + CSS background-image）
+            const items = container.querySelectorAll('li.item, li[class*="item"]');
+            for (const item of items) {
+                const bg = window.getComputedStyle(item).backgroundImage;
+                if (!bg || bg === 'none' || bg.includes('data:')) continue;
+                if (!bg.includes('url(')) continue;
+                const r = item.getBoundingClientRect();
+                if (r.width >= 60 && r.height >= 40 && item.offsetParent !== null) {
+                    item.click();
+                    return 'clicked li.item ' + Math.round(r.width) + 'x' + Math.round(r.height) + ' ' + bg.substring(0, 60);
                 }
-                console.log('IMG parent chain:', JSON.stringify(chain));
             }
 
-            // 直接找所有 IMG.btn.image-border 并点击（即使0x0也尝试）
+            // 策略2: 点击 IMG.btn.image-border（旧版头条图库使用）
             const imgs = container.querySelectorAll('IMG.btn.image-border');
             for (const img of imgs) {
                 const bg = window.getComputedStyle(img).backgroundImage;
                 if (!bg || bg === 'none' || bg.includes('data:')) continue;
                 if (!bg.includes('url(') || !bg.includes('tuchong')) continue;
-                // 直接点击 IMG 本身（JS click 不依赖 DOM 尺寸）
                 img.click();
                 return 'clicked IMG.btn.image-border ' + bg.substring(0, 60);
             }
 
-            // 回退：找所有带 tuchong 背景图的元素
-            const all = container.querySelectorAll('*');
+            // 策略3: 点击任意带 tuchong 背景图的元素（div/span/li/a）
+            const all = container.querySelectorAll('div, span, li, a');
             for (const el of all) {
                 const bg = window.getComputedStyle(el).backgroundImage;
                 if (!bg || bg === 'none' || bg.includes('data:')) continue;
                 if (!bg.includes('tuchong')) continue;
-                el.click();
-                return 'fallback_clicked ' + el.tagName + '.' + (el.className||'').substring(0,40);
+                const r = el.getBoundingClientRect();
+                if (r.width >= 60 && r.height >= 40 && el.offsetParent !== null) {
+                    el.click();
+                    return 'fallback_clicked ' + el.tagName + ' ' + Math.round(r.width) + 'x' + Math.round(r.height);
+                }
             }
 
             return 'not found';
@@ -652,259 +1105,198 @@ def _search_cover_image(page: Page, keywords: list) -> bool:
     return False
 
 
+def _click_any_large_image_js(page: Page) -> bool:
+    """
+    最终兜底：用 JS 在主页面内找任意大尺寸图片（不限 modal 范围）并点击。
+    这是最后的尝试，任何可见的大图都会尝试点击。
+    """
+    try:
+        result = page.evaluate("""
+            () => {
+                // 策略1：优先在 visible modal/dialog 内查找
+                const containers = document.querySelectorAll('[class*="modal"]:not([class*="mask"]), [class*="drawer"], [class*="dialog"], [class*="popup"], [class*="panel"]');
+                for (const c of containers) {
+                    const s = window.getComputedStyle(c);
+                    if (s.display === 'none' || s.visibility === 'hidden') continue;
+                    const r = c.getBoundingClientRect();
+                    if (r.width < 200 || r.height < 200) continue;
+                    // 找容器内最大的 img 或包含 img 的 div
+                    const imgs = c.querySelectorAll('img[src]');
+                    for (const img of imgs) {
+                        const ir = img.getBoundingClientRect();
+                        if (ir.width >= 100 && ir.height >= 75 && img.offsetParent !== null) {
+                            const src = (img.src || '').toLowerCase();
+                            if (src.includes('avatar') || src.includes('icon') || src.includes('logo') || src.includes('favicon') || src.includes('data:') || src.includes('.svg')) continue;
+                            img.click();
+                            return 'MODAL_IMG:' + ir.width + 'x' + ir.height;
+                        }
+                    }
+                    const divs = c.querySelectorAll('div');
+                    for (const d of divs) {
+                        const dr = d.getBoundingClientRect();
+                        if (dr.width >= 150 && dr.height >= 120 && d.offsetParent !== null && d.querySelector('img[src]')) {
+                            d.click();
+                            return 'MODAL_DIV:' + dr.width + 'x' + dr.height;
+                        }
+                    }
+                }
+                // 策略2：全页面找大尺寸图片（排除已知的 UI 图标区域）
+                const allImgs = document.querySelectorAll('img[src]');
+                for (const img of allImgs) {
+                    const ir = img.getBoundingClientRect();
+                    if (ir.width >= 120 && ir.height >= 100 && img.offsetParent !== null) {
+                        const src = (img.src || '').toLowerCase();
+                        if (src.includes('avatar') || src.includes('icon') || src.includes('logo') || src.includes('favicon') || src.includes('data:') || src.includes('.svg')) continue;
+                        // 排除编辑区内的图片
+                        if (img.closest('.ProseMirror') || img.closest('[contenteditable]')) continue;
+                        img.click();
+                        return 'GLOBAL_IMG:' + ir.width + 'x' + ir.height + ' ' + src.substring(0, 40);
+                    }
+                }
+                return 'NOT_FOUND';
+            }
+        """)
+        if result.startswith('MODAL') or result.startswith('GLOBAL'):
+            print(f"[封面] 最终兜底 JS 点击图片 ({result})")
+            time.sleep(1.5)
+            return True
+        elif result == 'NOT_FOUND':
+            print("[封面] 最终兜底 JS 也未找到合适图片")
+            return False
+        else:
+            print(f"[封面] 最终兜底 JS: {result}")
+            return 'CLICKED' in result
+    except Exception as e:
+        print(f"[封面] 最终兜底 JS 异常: {e}")
+        return False
+
+
+def _select_no_cover(page: Page) -> None:
+    """选择「无封面」模式，跳过封面上传流程直接发布"""
+    time.sleep(1)
+    no_cover = page.locator('text=无封面').first
+    if no_cover.count() > 0 and no_cover.is_visible(timeout=3000):
+        no_cover.click()
+        print("已选择「无封面」")
+        time.sleep(2)
+    else:
+        print("[!] 未找到「无封面」选项，继续流程")
+
+
 def _click_publish(page: Page) -> None:
     """
     点击发布按钮。
-    头条的流程是：在编辑页面点击"预览并发布" → 弹出预览对话框 → 在对话框中点击"发布"。
+    头条的流程取决于是否有封面：
+    - 无封面：按钮为「确认发布」，一键直接发布
+    - 有封面：按钮为「预览并发布」，可能弹出预览对话框再确认
+    关键：必须点击按钮内部的 <span> 元素并派发原生 MouseEvent，才能触发 Vue 事件处理器。
     """
-    # ========== 第零步：发布前清理，确保没有遮挡 ==========
+    # ========== 第零步：清理遮挡 ==========
     time.sleep(1)
-    # 按几次 ESC 确保没有残留弹窗/面板遮挡发布按钮
-    for _ in range(2):
+    for _ in range(3):
         page.keyboard.press("Escape")
         time.sleep(0.5)
-    # 点击页面空白处确保焦点不在编辑器内
-    try:
-        page.mouse.click(100, 300)
-        time.sleep(0.5)
-    except:
-        pass
-    # 检查是否有可见的遮罩层遮挡按钮，如果有就点击遮罩层关闭
-    try:
-        mask = page.locator('.byte-modal-mask, .byte-drawer-mask').first
-        if mask.count() > 0 and mask.is_visible(timeout=1000):
-            mask.click()
-            print("发布前清理：点击了残留遮罩层")
-            time.sleep(0.5)
-    except:
-        pass
-    # 重要：不再使用 JS 设置 display:none，否则会破坏后续预览弹窗
+    page.evaluate("""
+        () => {
+            document.querySelectorAll('.byte-drawer-mask, .byte-modal-mask, .byte-drawer-wrapper').forEach(m => {
+                if (m.offsetParent !== null) m.style.display = 'none';
+            });
+        }
+    """)
+    time.sleep(0.5)
 
-    # ========== 第一步：点击"预览并发布"按钮（编辑页面上的主按钮） ==========
-    # 注意：页面有两个 button.publish-btn（"预览并发布"和"定时发布"），封面区也有"预览"按钮
-    # 必须用完整文字"预览并发布"精确匹配，避免误点封面预览或定时发布
-    preview_publish_selectors = [
-        'button.publish-btn:has-text("预览并发布")',
-        'button.publish-btn >> text=预览并发布',
-        'button:has-text("预览并发布")',
-        'span:has-text("预览并发布")',
-        'text=预览并发布',
-        'button.publish-btn-last',
-        '[class*="preview"]:has-text("发布")',
-        '[class*="publish"]:has-text("发布")',
-    ]
-
-    found_preview = False
-    for sel in preview_publish_selectors:
-        try:
-            btn = page.locator(sel).first
-            if btn.is_visible(timeout=3000):
-                btn.scroll_into_view_if_needed()
-                time.sleep(0.3)
-                btn.click()
-                print(f"点击了「预览并发布」（选择器: {sel}）")
-                time.sleep(3)
-                found_preview = True
-                break
-        except:
-            continue
-
-    if not found_preview:
-        # 如果没有"预览并发布"按钮，尝试直接找"发布"按钮（老版本或特殊情况）
-        for sel in ['button:has-text("发布")', 'button:has-text("提交")']:
-            try:
-                btn = page.locator(sel).first
-                if btn.is_visible(timeout=3000):
-                    btn.scroll_into_view_if_needed()
-                    btn.click()
-                    print(f"直接点击了「发布」（选择器: {sel}）")
-                    time.sleep(3)
-                    break
-            except:
-                continue
-
-    # ========== 第二步：在预览/发布对话框中点击真正的"发布"按钮 ==========
-    time.sleep(1)
-
-    dialog_publish_selectors = [
-        'button.publish-btn.byte-btn-primary:has-text("预览并发布")',
-        'button.byte-btn-primary:has-text("预览并发布")',
-        'button.publish-btn.byte-btn-primary:has-text("发布")',
-        '.byte-modal button:has-text("发布")',
-        '.byte-dialog button:has-text("发布")',
-        'button:has-text("确认发布")',
-        'button:has-text("发布")',
-        '[class*="dialog"] button:has-text("发布")',
-    ]
-    dialog_clicked = False
-    for sel in dialog_publish_selectors:
-        try:
-            btn = page.locator(sel).first
-            if btn.is_visible(timeout=3000):
-                # 用 JS 原生 MouseEvent 派发，确保 Vue 事件处理器能响应
-                result = page.evaluate(f"""
-                    () => {{
-                        const sel = {sel!r};
-                        const el = document.querySelector(sel) || [...document.querySelectorAll('button')].find(b => b.innerText.includes('发布'));
-                        if (!el) return 'NOT_FOUND';
-                        const rect = el.getBoundingClientRect();
-                        const cx = rect.left + rect.width / 2;
-                        const cy = rect.top + rect.height / 2;
-                        ['mousedown', 'mouseup', 'click'].forEach(name => {{
-                            el.dispatchEvent(new MouseEvent(name, {{
-                                bubbles: true, cancelable: true,
-                                clientX: cx, clientY: cy, button: 0
-                            }}));
-                        }});
-                        return 'CLICKED:' + el.innerText.trim().slice(0, 20);
-                    }}
-                """)
-                print(f"在对话框中点击了发布（选择器: {sel}）, 结果: {result}")
-                time.sleep(3)
-                dialog_clicked = True
-                break
-        except:
-            continue
-
-    if not dialog_clicked:
-        # JS 兜底：找所有含"发布"的 button，点击 primary 的那个
-        result = page.evaluate("""
-            () => {
-                const buttons = [...document.querySelectorAll('button')].filter(b =>
-                    b.offsetParent !== null && b.innerText.includes('发布')
-                );
-                // 优先点 primary 按钮
-                const primary = buttons.find(b => b.className.includes('primary'));
-                const target = primary || buttons[0];
-                if (!target) return 'NOT_FOUND';
-                const rect = target.getBoundingClientRect();
-                const cx = rect.left + rect.width / 2;
-                const cy = rect.top + rect.height / 2;
-                ['mousedown', 'mouseup', 'click'].forEach(name => {
-                    target.dispatchEvent(new MouseEvent(name, {
-                        bubbles: true, cancelable: true,
-                        clientX: cx, clientY: cy, button: 0
-                    }));
-                });
-                return 'FALLBACK_CLICKED:' + target.innerText.trim().slice(0, 30);
-            }
-        """)
-        print(f"对话框发布按钮 JS 兜底: {result}")
-        time.sleep(3)
-
-    # ========== 第三步：等待发布结果，先检测成功再关弹窗 ==========
+    # ========== 第一步：点击主发布按钮内部的 SPAN ==========
+    # 经验证：点击 SPAN 派发原生 MouseEvent 能正确触发发布 API
+    print("正在点击发布按钮...")
+    clicked_text = page.evaluate("""
+        () => {
+            const btn = [...document.querySelectorAll('button')].find(b =>
+                b.offsetParent !== null &&
+                b.className.includes('primary') &&
+                (b.innerText.includes('发布') || b.innerText.includes('预览并发布'))
+            );
+            if (!btn) return 'NOT_FOUND';
+            // 点击内部 SPAN（而非 button 本身），这是触发 Vue 事件的关键
+            const span = btn.querySelector('span');
+            const target = span || btn;
+            const rect = target.getBoundingClientRect();
+            const cx = rect.left + rect.width / 2;
+            const cy = rect.top + rect.height / 2;
+            ['mousedown', 'mouseup', 'click'].forEach(name => {
+                target.dispatchEvent(new MouseEvent(name, {
+                    bubbles: true, cancelable: true,
+                    clientX: cx, clientY: cy, button: 0
+                }));
+            });
+            return btn.innerText.trim().slice(0, 30);
+        }
+    """)
+    print(f"点击了: {clicked_text}")
     time.sleep(3)
 
-    # 先检查是否发布成功，成功的话截图保存证据
-    success_hints = ["发布成功", "已发布", "提交成功", "操作成功", "审核"]
-    content = page.content()
-    already_success = False
-    for hint in success_hints:
-        if hint in content:
-            print(f"检测到发布成功提示: {hint}")
-            already_success = True
-            break
+    # ========== 第二步：检查是否需要二次点击（确认发布） ==========
+    # 首次点击后按钮可能变为「确认发布」，需要再点一次
+    second_click = page.evaluate("""
+        () => {
+            const btn = [...document.querySelectorAll('button')].find(b =>
+                b.offsetParent !== null &&
+                b.className.includes('primary') &&
+                (b.innerText.includes('确认发布') || b.innerText.includes('发布'))
+            );
+            if (!btn) return null;
+            const span = btn.querySelector('span');
+            const target = span || btn;
+            const rect = target.getBoundingClientRect();
+            ['mousedown', 'mouseup', 'click'].forEach(name => {
+                target.dispatchEvent(new MouseEvent(name, {
+                    bubbles: true, cancelable: true,
+                    clientX: rect.left + rect.width / 2,
+                    clientY: rect.top + rect.height / 2,
+                    button: 0
+                }));
+            });
+            return btn.innerText.trim().slice(0, 30);
+        }
+    """)
+    if second_click:
+        print(f"二次点击: {second_click}")
+        time.sleep(3)
+    else:
+        print("未找到二次确认按钮（可能已直接发布）")
 
-    if already_success:
-        # 成功后如果有"我知道了"按钮，点掉即可
-        try:
-            page.evaluate("""
-                () => {
-                    const buttons = [...document.querySelectorAll('button, span, div[role="button"], a')];
-                    const target = buttons.find(el => el.innerText.trim() === '我知道了');
-                    if (target) target.click();
-                }
-            """)
-        except:
-            pass
-        return
+    print("发布按钮已点击，等待结果...")
 
-    # 还没检测到成功，逐个处理弹窗按钮（但"我知道了"可能是成功弹窗，先跳过它检测成功）
-    js_click_button_texts = [
-        "确定",
-        "确认发布",
-        "发布",
-        "暂不",
-        "跳过",
-        "关闭",
-        "保存",
-        "完成",
-    ]
-    for text in js_click_button_texts:
-        try:
-            clicked = page.evaluate("""
-                (text) => {
-                    const buttons = [...document.querySelectorAll('button, span, div[role="button"], a')];
-                    const target = buttons.find(el => el.innerText.trim() === text || el.innerText.includes(text));
-                    if (target) {
-                        target.click();
-                        return true;
-                    }
-                    return false;
-                }
-            """, text)
-            if clicked:
-                print(f"JS 点击了按钮: {text}")
-                time.sleep(1)
-        except:
-            pass
 
-    # 再次检查成功提示（"我知道了"按钮出现往往意味着成功）
-    time.sleep(2)
-    for hint in success_hints:
-        if hint in page.content():
-            print(f"二次检测到发布成功提示: {hint}")
-            already_success = True
-            break
-
-    # 检查是否有"我知道了"按钮（通常是成功后的确认按钮）
-    try:
-        clicked = page.evaluate("""
-            () => {
-                const buttons = [...document.querySelectorAll('button, span, div[role="button"], a')];
-                const target = buttons.find(el => el.innerText.trim() === '我知道了');
+def _click_publish_fallback(page: Page) -> None:
+    """备用：使用 JS 直接查找并点击页面中所有可能的发布按钮"""
+    clicked = page.evaluate("""
+        () => {
+            const texts = ['预览并发布', '发布', '确认发布', '提交'];
+            const allElements = [...document.querySelectorAll('button, span, a, div')];
+            for (const text of texts) {
+                const target = allElements.find(el =>
+                    el.innerText.trim() === text || el.innerText.includes(text)
+                );
                 if (target) {
                     target.click();
-                    return true;
+                    return text;
                 }
-                return false;
             }
-        """)
-        if clicked:
-            print("JS 点击了按钮: 我知道了（成功确认）")
-            time.sleep(1)
-    except:
-        pass
-
-    # 最后再按 ESC 清除残留弹窗
-    page.keyboard.press("Escape")
-    time.sleep(0.5)
-    page.keyboard.press("Escape")
-    time.sleep(0.5)
-
-    if already_success:
-        return
-
-    # ========== 第四步：最终验证 ==========
-    for hint in success_hints:
-        if hint in page.content():
-            print(f"最终检测到发布成功提示: {hint}")
-            return
-
-    print("发布操作完成，等待后续确认...")
-
+            return null;
+        }
+    """)
+    if clicked:
+        print(f"JS 备用点击: {clicked}")
+    else:
+        print("JS 备用未找到任何发布按钮")
 
 
 def _wait_for_success(page: Page, timeout: int = 30) -> str:
+    """等待发布成功。只用真正表示成功的一次性提示，不依赖导航菜单常驻文字。"""
     success_hints = [
         "发布成功",
-        "已发布",
-        "审核",
         "提交成功",
         "操作成功",
-        "内容管理",       # 发布后可能跳转到内容管理页
-        "作品管理",
-        "文章管理",
     ]
     start_url = page.url
     print(f"等待发布结果（当前 URL: {start_url}）...")
@@ -913,22 +1305,50 @@ def _wait_for_success(page: Page, timeout: int = 30) -> str:
     while time.time() < deadline:
         current_url = page.url
 
-        # 检查 URL 是否变化（发布成功后通常会跳转）
+        # URL 跳转到管理页 = 发布成功（排除仅 hash 变化）
         if current_url != start_url:
-            path = f"success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-            page.screenshot(path=path, full_page=True)
-            print(f"页面已跳转: {start_url} -> {current_url}")
-            print(f"发布成功截图: {path}")
-            return path
+            management_paths = [
+                "/content/manage", "/article/manage", "/content/article",
+                "/content/video", "/content",
+                "/profile_v4/content", "/profile_v4/article",
+            ]
+            is_management = any(p in current_url for p in management_paths)
+            is_different_base = current_url.split("?")[0].split("#")[0] != start_url.split("?")[0].split("#")[0]
 
-        # 检查页面内容中的成功提示
-        content = page.content()
-        for hint in success_hints:
-            if hint in content:
+            if is_management or is_different_base:
                 path = f"success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
                 page.screenshot(path=path, full_page=True)
-                print(f"检测到成功提示「{hint}」，截图: {path}")
+                print(f"页面已跳转: {start_url} -> {current_url}")
+                print(f"发布成功截图: {path}")
                 return path
+
+        # 在弹窗/toast/通知区域检查一次性成功提示（不匹配导航栏）
+        try:
+            has_success_toast = page.evaluate("""
+                (hints) => {
+                    const containers = document.querySelectorAll(
+                        '.byte-modal, .byte-dialog, .byte-toast, .byte-notification, ' +
+                        '.muse-dialog, .el-message, .el-notification, ' +
+                        '[class*="toast"], [class*="notification"], [class*="message"], ' +
+                        '[class*="dialog"]:not([class*="garr"])'
+                    );
+                    for (const el of containers) {
+                        if (!el.offsetParent && el.tagName !== 'DIV') continue;
+                        const text = el.textContent || '';
+                        for (const hint of hints) {
+                            if (text.includes(hint)) return true;
+                        }
+                    }
+                    return false;
+                }
+            """, success_hints)
+            if has_success_toast:
+                path = f"success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                page.screenshot(path=path, full_page=True)
+                print(f"检测到成功 toast/弹窗，截图: {path}")
+                return path
+        except:
+            pass
 
         # 检查"我知道了"按钮（出现即表示成功）
         try:
@@ -939,6 +1359,15 @@ def _wait_for_success(page: Page, timeout: int = 30) -> str:
                 }
             """)
             if has_btn:
+                # 点掉"我知道了"
+                page.evaluate("""
+                    () => {
+                        const buttons = [...document.querySelectorAll('button, span, div[role="button"], a')];
+                        const target = buttons.find(el => el.innerText.trim() === '我知道了');
+                        if (target) target.click();
+                    }
+                """)
+                time.sleep(1)
                 path = f"success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
                 page.screenshot(path=path, full_page=True)
                 print(f"检测到「我知道了」按钮，发布成功。截图: {path}")
@@ -983,10 +1412,20 @@ def publish(title: str, body: str) -> None:
             time.sleep(0.5)
             _fill_body(page, body)
             time.sleep(1)
+            # 保存填写完成截图
+            screenshot_after_fill = f"step1_filled_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            page.screenshot(path=screenshot_after_fill, full_page=True)
+            print(f"填写完成截图: {screenshot_after_fill}")
 
+            # 3.5 设置封面
             _set_cover(page)
             time.sleep(1)
+            # 保存封面设置后截图
+            screenshot_after_cover = f"step2_cover_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            page.screenshot(path=screenshot_after_cover, full_page=True)
+            print(f"封面设置后截图: {screenshot_after_cover}")
 
+            # 4. 点击发布
             _click_publish(page)
 
             # 5. 等待成功并截图
