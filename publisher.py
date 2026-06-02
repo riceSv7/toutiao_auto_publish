@@ -791,74 +791,114 @@ def _switch_to_free_tab_in_modal(page: Page) -> bool:
 
 
 def _search_and_click_image_in_modal(page: Page, keywords: list) -> bool:
-    """在弹窗内搜索关键词并点击第一张图片"""
-    # 先尝试搜索
-    _search_cover_image(page, keywords)
-    time.sleep(3)  # 等搜索结果加载
+    """在抽屉内找图片并点击。先等默认图片加载，不行再搜索。"""
+    # 先不用搜索，等默认图片自然加载
+    print("[封面] 等待抽屉内图片加载...")
+    time.sleep(5)  # 给足时间让默认图片加载
 
-    # 诊断：dump 抽屉内所有图片和可点击元素
-    drawer_info = page.evaluate("""
-        () => {
-            const results = [];
-            const drawer = document.querySelector('.byte-drawer');
-            if (!drawer) return 'no drawer';
-            const imgs = drawer.querySelectorAll('img[src]');
-            results.push('total imgs: ' + imgs.length);
-            imgs.forEach((img, i) => {
-                const r = img.getBoundingClientRect();
-                results.push('img[' + i + ']: ' + r.width + 'x' + r.height + ' vis=' + (img.offsetParent !== null) + ' src=' + (img.src || '').substring(0, 80));
-            });
-            // 也检查所有大尺寸 div（可能是图片容器）
-            const divs = drawer.querySelectorAll('div');
-            let bigDivs = 0;
-            divs.forEach(d => {
-                const r = d.getBoundingClientRect();
-                if (r.width >= 100 && r.height >= 80 && d.offsetParent !== null) {
-                    bigDivs++;
-                    if (bigDivs <= 5) {
-                        results.push('bigDiv: ' + (d.className || '').substring(0, 60) + ' ' + r.width + 'x' + r.height);
-                    }
-                }
-            });
-            return JSON.stringify(results);
-        }
-    """)
-    print(f"[封面] 搜索后抽屉诊断: {drawer_info}")
-
-    # 在弹窗内查找并点击图片
+    # 在抽屉内滚动一下触发懒加载
     try:
-        page.wait_for_selector('[class*="modal"] img, [class*="dialog"] img, [class*="panel"] img, [class*="drawer"] img', state='visible', timeout=8000)
-        time.sleep(2)
-        result = page.evaluate("""
+        page.evaluate("""
             () => {
-                const containers = document.querySelectorAll('[class*="modal"], [class*="dialog"], [class*="panel"], [class*="drawer"]');
-                for (const c of containers) {
-                    if (c.offsetParent === null) continue;
-                    const rect = c.getBoundingClientRect();
-                    if (rect.width < 200 || rect.height < 200) continue;
-                    const imgs = c.querySelectorAll('img[src]');
-                    for (const img of imgs) {
-                        if (img.offsetParent === null) continue;
-                        const ir = img.getBoundingClientRect();
-                        if (ir.width < 80 || ir.height < 60) continue;
-                        const src = (img.src || '').toLowerCase();
-                        if (src.includes('data:') || src.includes('.svg') || src.includes('icon') || src.includes('avatar')) continue;
-                        img.click();
-                        return 'clicked ' + ir.width + 'x' + ir.height;
-                    }
-                }
-                return 'not found';
+                const scroll = document.querySelector('.byte-drawer-scroll');
+                if (scroll) scroll.scrollTop += 300;
             }
         """)
-        if result.startswith('clicked'):
-            print(f"[封面] 已点击弹窗内图片 ({result})")
-            time.sleep(2)
+        time.sleep(1)
+    except:
+        pass
+
+    # 在抽屉内查找真实图片
+    result = _find_and_click_image_in_container(page, '.byte-drawer')
+    if result:
+        return True
+
+    # 没找到 → 在抽屉内搜索
+    print("[封面] 默认无图片，在抽屉内搜索...")
+    _search_in_drawer(page, keywords)
+    time.sleep(5)  # 等搜索结果加载
+    # 再滚动触发懒加载
+    try:
+        page.evaluate("() => { const s = document.querySelector('.byte-drawer-scroll'); if (s) s.scrollTop += 300; }")
+        time.sleep(1)
+    except:
+        pass
+    return _find_and_click_image_in_container(page, '.byte-drawer')
+
+
+def _find_and_click_image_in_container(page: Page, container_sel: str) -> bool:
+    """在指定容器内找第一张 >= 80x60 的真实图片并点击"""
+    result = page.evaluate("""
+        (sel) => {
+            const container = document.querySelector(sel);
+            if (!container) return 'no container';
+            const imgs = container.querySelectorAll('img[src]');
+            for (const img of imgs) {
+                if (img.offsetParent === null) continue;
+                const ir = img.getBoundingClientRect();
+                if (ir.width < 80 || ir.height < 60) continue;
+                const src = (img.src || '').toLowerCase();
+                if (src.includes('data:') || src.includes('.svg') || src.includes('icon') || src.includes('avatar') || src.includes('gif;base64')) continue;
+                img.click();
+                return 'clicked ' + ir.width + 'x' + ir.height + ' ' + src.substring(0, 60);
+            }
+            // 也检查大尺寸 div（图片容器）
+            const divs = container.querySelectorAll('div');
+            for (const d of divs) {
+                const dr = d.getBoundingClientRect();
+                if (dr.width >= 120 && dr.height >= 100 && d.offsetParent !== null && d.querySelector('img[src]')) {
+                    d.click();
+                    return 'clicked_div ' + dr.width + 'x' + dr.height;
+                }
+            }
+            return 'not found';
+        }
+    """, container_sel)
+    print(f"[封面] 容器内找图结果: {result}")
+    if result.startswith('clicked'):
+        time.sleep(2)
+        return True
+    return False
+
+
+def _search_in_drawer(page: Page, keywords: list) -> bool:
+    """在 byte-drawer 内搜索关键词"""
+    # 只找抽屉内的搜索框
+    search_selectors = [
+        '.byte-drawer input[placeholder*="搜索"]',
+        '.byte-drawer input[type="search"]',
+        '.byte-drawer input:not([type="hidden"])',
+    ]
+    for sel in search_selectors:
+        try:
+            si = page.locator(sel).first
+            if si.count() > 0 and si.is_visible(timeout=2000):
+                si.click()
+                time.sleep(0.3)
+                si.fill("")
+                time.sleep(0.2)
+                si.type(keywords[0], delay=50)
+                time.sleep(0.5)
+                page.keyboard.press("Enter")
+                print(f"[封面] 抽屉内搜索: {keywords[0]}")
+                time.sleep(3)
+                return True
+        except:
+            continue
+    # 兜底：用通用选择器但优先可见的
+    try:
+        si = page.locator('input[placeholder*="搜索"]').first
+        if si.count() > 0 and si.is_visible(timeout=2000):
+            si.click()
+            si.fill(keywords[0])
+            page.keyboard.press("Enter")
+            print(f"[封面] 兜底搜索: {keywords[0]}")
+            time.sleep(3)
             return True
-        print(f"[封面] 弹窗内未找到合适图片: {result}")
-        return False
-    except Exception as e:
-        print(f"[封面] 弹窗内选图异常: {e}")
-        return False
+    except:
+        pass
+    print("[封面] 未找到搜索框")
+    return False
 
 
 def _click_confirm_in_modal(page: Page) -> bool:
