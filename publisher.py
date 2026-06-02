@@ -173,43 +173,49 @@ def _fill_body(page: Page, body: str) -> None:
 
 
 def _is_cover_already_set(page: Page) -> bool:
-    """检测封面是否已经设置好了（已有图片显示），如果是则跳过封面上传流程"""
+    """检测封面是否已经设置好了（已有真实大图），如果是则跳过封面上传流程"""
     time.sleep(1)
-    # 检查页面中是否存在已设置的封面图
-    checks = [
-        # 封面区域内的 img 标签且已经加载
-        "document.querySelector('[class*=\"cover\"] img') !== null",
-        # 封面容器内含有 src 属性的图片
-        "document.querySelector('[class*=\"cover\"] img[src]') !== null",
-        # 某些头条版本中封面是 background-image
-        """() => {
-            const el = document.querySelector('[class*=\"cover\"]');
-            if (!el) return false;
-            const bg = window.getComputedStyle(el).backgroundImage;
-            return bg && bg !== 'none' && bg.includes('url');
-        }""",
-        # 封面预览区域（class 含 preview 或 show 的图片）
-        "document.querySelector('[class*=\"preview\"] img[src]') !== null",
-    ]
-    for js_code in checks:
-        try:
-            if page.evaluate(js_code):
-                print("检测到封面已设置，跳过封面上传步骤")
-                return True
-        except:
-            continue
+    # 用 JS 检查封面区域是否有真实尺寸的图片（排除占位符小图标）
+    has_real_cover = page.evaluate("""
+        () => {
+            // 检查封面区域所有 img，找到任何一个 >= 80px 宽的真实图片
+            const imgs = document.querySelectorAll('[class*="cover"] img[src]');
+            for (const img of imgs) {
+                if (!img.offsetParent) continue;
+                const src = (img.src || '').toLowerCase();
+                // 排除明显是小图标/占位符的
+                if (src.includes('data:')) continue;
+                if (src.includes('.svg')) continue;
+                if (src.includes('icon') || src.includes('avatar') || src.includes('logo')) continue;
+                const rect = img.getBoundingClientRect();
+                if (rect.width >= 80 && rect.height >= 60) {
+                    return true;
+                }
+            }
+            // 检查背景图（排除占位符）
+            const coverEls = document.querySelectorAll('[class*="cover"]');
+            for (const el of coverEls) {
+                const bg = window.getComputedStyle(el).backgroundImage;
+                if (bg && bg !== 'none' && bg.includes('url') && !bg.includes('data:') && !bg.includes('.svg')) {
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width >= 80 && rect.height >= 60) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+    """)
+    if has_real_cover:
+        print("检测到封面已设置（有真实大图），跳过封面上传步骤")
+        return True
 
-    # 额外检查：看页面上有没有 text=添加封面，如果没有（只有编辑封面），说明已经有封面了
+    # 额外检查：看页面上有没有"编辑封面"或"更换封面"文字
     try:
-        add_btn = page.locator('text=添加封面').first
-        if not add_btn.is_visible(timeout=1000):
-            # "添加封面"按钮不可见，但可能存在"编辑封面"或"更换封面"
-            edit_btn = page.locator('text=编辑封面').first
-            change_btn = page.locator('text=更换封面').first
-            has_edit = edit_btn.is_visible(timeout=500) if edit_btn.count() else False
-            has_change = change_btn.is_visible(timeout=500) if change_btn.count() else False
-            if has_edit or has_change:
-                print("检测到封面已设置（有编辑封面按钮），跳过封面上传步骤")
+        for text in ['编辑封面', '更换封面']:
+            btn = page.locator(f'text={text}').first
+            if btn.count() > 0 and btn.is_visible(timeout=500):
+                print(f"检测到封面已设置（有'{text}'按钮），跳过封面上传步骤")
                 return True
     except:
         pass
@@ -254,7 +260,7 @@ def _dismiss_cover_panel(page: Page) -> None:
     try:
         still_open = page.locator('.byte-modal, .byte-drawer').first
         if still_open.count() > 0 and still_open.is_visible(timeout=2000):
-            print("⚠ 警告：封面面板可能未完全关闭，但继续执行")
+            print("[!] 警告：封面面板可能未完全关闭，但继续执行")
         else:
             print("封面面板已关闭")
     except:
@@ -447,13 +453,13 @@ def _ensure_single_image_checked(page: Page) -> None:
                 """, sel)
                 if not is_checked:
                     el.click()
-                    print("✅ 已选中「单图」")
+                    print("[OK] 已选中「单图」")
                 else:
-                    print("✅ 「单图」已处于选中状态")
+                    print("[OK] 「单图」已处于选中状态")
                 return
         except:
             continue
-    print("⚠ 未明确找到「单图」选择器，假定默认选中")
+    print("[!] 未明确找到「单图」选择器，假定默认选中")
 
 
 def _click_cover_add_button(page: Page) -> bool:
@@ -854,8 +860,8 @@ def _click_publish(page: Page) -> None:
 
     # ========== 第一步：点击"预览并发布"按钮（编辑页面上的主按钮） ==========
     preview_publish_selectors = [
-        'button.publish-btn',                       # ★ 实测头条发布按钮 class
-        'button.publish-btn-last',                  # ★ 实测备选
+        'button.publish-btn',                       # * 实测头条发布按钮 class
+        'button.publish-btn-last',                  # * 实测备选
         'button:has-text("预览并发布")',
         'span:has-text("预览并发布")',
         '[class*="preview"]:has-text("发布")',
@@ -1062,9 +1068,9 @@ def publish(title: str, body: str) -> None:
             # 5. 等待成功并截图
             result_path = _wait_for_success(page)
             if "success" not in result_path:
-                print(f"⚠ 未检测到明确成功提示，请检查截图: {result_path}")
+                print(f"[!] 未检测到明确成功提示，请检查截图: {result_path}")
             else:
-                print(f"✅ 发布成功！截图: {result_path}")
+                print(f"[OK] 发布成功！截图: {result_path}")
 
         finally:
             context.close()
