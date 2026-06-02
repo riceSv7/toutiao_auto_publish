@@ -445,6 +445,14 @@ def _click_cover_add_button(page: Page) -> bool:
     头条「展示封面」区域中有一个 + 号预览方框，点击后弹出素材弹窗。
     """
     add_selectors = [
+        # 根据你的页面描述，最可能的选择器
+        'text=预览',
+        'text="+"',
+        'button:has-text("预览")',
+        'span:has-text("预览")',
+        'div[class*="cover"] >> text=预览',
+        'div[class*="cover"] >> text="+"',
+        # 保留原有的兜底选择器
         '.article-cover-add',
         '[class*="cover-add"]',
         '[class*="cover"] [class*="add"]',
@@ -469,7 +477,7 @@ def _click_cover_add_button(page: Page) -> bool:
             () => {
                 const all = document.querySelectorAll('[class*="cover"] [class*="add"], [class*="cover"] button, [class*="cover"] span');
                 for (const el of all) {
-                    if (el.offsetParent !== null && (el.textContent.trim() === '' || el.textContent.includes('+') || el.textContent.includes('添加') || el.textContent.includes('上传'))) {
+                    if (el.offsetParent !== null && (el.textContent.trim() === '' || el.textContent.includes('+') || el.textContent.includes('添加') || el.textContent.includes('上传') || el.textContent.includes('预览'))) {
                         el.click();
                         return 'CLICKED:' + el.className;
                     }
@@ -507,6 +515,25 @@ def _click_cover_image_in_modal(page: Page) -> bool:
     在主页面 DOM 的 modal 面板中搜索并点击第一张合适的封面图片。
     封面素材面板是主页面内的弹窗（非 iframe），图片点击后自动选中。
     """
+    # 等待弹窗出现，确保图片加载完成
+    try:
+        page.wait_for_selector('.byte-modal', state='visible', timeout=5000)
+        print("[封面] 弹窗已打开")
+    except:
+        print("[封面] 等待弹窗超时，继续尝试...")
+    time.sleep(2)  # 等图片加载
+
+    # 简化点击：直接点击弹窗内第一张可见的图片
+    first_img = page.locator('.byte-modal img').first
+    if first_img.count() > 0:
+        try:
+            first_img.click(force=True)
+            print("[封面] 已点击弹窗内第一张图片")
+            time.sleep(2)
+            return True
+        except Exception as e:
+            print(f"[封面] 点击弹窗内第一张图片失败: {e}")
+
     # 先找「免费正版图片」tab 并确保选中
     free_tab_selectors = [
         'text=免费正版图片',
