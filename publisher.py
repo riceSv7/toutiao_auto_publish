@@ -368,16 +368,12 @@ def _set_cover(page: Page) -> None:
         return
     time.sleep(3)
 
-    # 步骤 2：直接上传本地图片 cover.jpg
-    print("[封面] 步骤2 - 上传本地图片...")
-    img_clicked = _upload_local_cover(page)
-    if not img_clicked:
-        # 上传失败，回退到搜索图库的方式
-        print("[封面] 步骤2b - 切换免费正版图片tab...")
-        _switch_to_free_tab_in_modal(page)
-        time.sleep(2)
-        print("[封面] 步骤3 - 搜索关键词并点击图片...")
-        img_clicked = _search_and_click_image_in_modal(page, keywords=["情感", "深夜", "女性", "婚姻", "伤感"])
+    # 步骤 2：切换到「免费正版图片」tab 并搜索选图
+    print("[封面] 步骤2 - 切换到「免费正版图片」tab...")
+    _switch_to_free_tab_in_modal(page)
+    time.sleep(2)
+    print("[封面] 步骤3 - 搜索关键词并点击图片...")
+    img_clicked = _search_and_click_image_in_modal(page, keywords=["情感", "深夜", "女性", "婚姻", "伤感"])
 
     # 步骤 4：点击「确定」按钮确认选图
     if img_clicked:
@@ -942,36 +938,46 @@ def _find_and_click_image_in_container(page: Page, container_sel: str) -> bool:
         (sel) => {
             const container = document.querySelector(sel);
             if (!container) return 'no container';
+
+            // 先诊断第一个 IMG.btn.image-border 的父链
+            const firstImg = container.querySelector('IMG.btn.image-border') || container.querySelector('img[style*="background"]');
+            if (firstImg) {
+                let chain = [];
+                let p = firstImg;
+                for (let i = 0; i < 8 && p && p !== document.body; i++) {
+                    const r = p.getBoundingClientRect();
+                    chain.push(p.tagName + '.' + (p.className||'').substring(0,30) + ' ' + r.width + 'x' + r.height + ' cs=' + window.getComputedStyle(p).display);
+                    p = p.parentElement;
+                }
+                console.log('IMG parent chain:', JSON.stringify(chain));
+            }
+
+            // 直接找所有 IMG.btn.image-border 并点击（即使0x0也尝试）
+            const imgs = container.querySelectorAll('IMG.btn.image-border');
+            for (const img of imgs) {
+                const bg = window.getComputedStyle(img).backgroundImage;
+                if (!bg || bg === 'none' || bg.includes('data:')) continue;
+                if (!bg.includes('url(') || !bg.includes('tuchong')) continue;
+                // 直接点击 IMG 本身（JS click 不依赖 DOM 尺寸）
+                img.click();
+                return 'clicked IMG.btn.image-border ' + bg.substring(0, 60);
+            }
+
+            // 回退：找所有带 tuchong 背景图的元素
             const all = container.querySelectorAll('*');
             for (const el of all) {
                 const bg = window.getComputedStyle(el).backgroundImage;
                 if (!bg || bg === 'none' || bg.includes('data:')) continue;
-                if (!bg.includes('url(')) continue;
-                // 元素本身可能是 0x0（IMG.btn.image-border），往上找有尺寸的父元素点击
-                let target = el;
-                let tr = el.getBoundingClientRect();
-                if (tr.width < 50 || tr.height < 50) {
-                    let p = el.parentElement;
-                    while (p && p !== container) {
-                        const pr = p.getBoundingClientRect();
-                        if (pr.width >= 80 && pr.height >= 60) {
-                            target = p;
-                            tr = pr;
-                            break;
-                        }
-                        p = p.parentElement;
-                    }
-                }
-                if (tr.width >= 80 && tr.height >= 60) {
-                    target.click();
-                    return 'clicked ' + target.tagName + '.' + (target.className||'').substring(0,40) + ' ' + tr.width + 'x' + tr.height + ' ' + bg.substring(0, 60);
-                }
+                if (!bg.includes('tuchong')) continue;
+                el.click();
+                return 'fallback_clicked ' + el.tagName + '.' + (el.className||'').substring(0,40);
             }
+
             return 'not found';
         }
     """, container_sel)
     print(f"[封面] 背景图查找: {result}")
-    if result.startswith('clicked'):
+    if result and result.startswith(('clicked', 'fallback_clicked')):
         time.sleep(2)
         return True
     return False
@@ -1160,14 +1166,17 @@ def _click_publish(page: Page) -> None:
     # 重要：不再使用 JS 设置 display:none，否则会破坏后续预览弹窗
 
     # ========== 第一步：点击"预览并发布"按钮（编辑页面上的主按钮） ==========
+    # 注意：页面有两个 button.publish-btn（"预览并发布"和"定时发布"），封面区也有"预览"按钮
+    # 必须用完整文字"预览并发布"精确匹配，避免误点封面预览或定时发布
     preview_publish_selectors = [
-        'button.publish-btn',                       # * 实测头条发布按钮 class
-        'button.publish-btn-last',                  # * 实测备选
+        'button.publish-btn:has-text("预览并发布")',
+        'button.publish-btn >> text=预览并发布',
         'button:has-text("预览并发布")',
         'span:has-text("预览并发布")',
+        'text=预览并发布',
+        'button.publish-btn-last',
         '[class*="preview"]:has-text("发布")',
         '[class*="publish"]:has-text("发布")',
-        'text=预览并发布',
     ]
 
     found_preview = False
@@ -1202,31 +1211,128 @@ def _click_publish(page: Page) -> None:
     # ========== 第二步：在预览/发布对话框中点击真正的"发布"按钮 ==========
     time.sleep(1)
 
-    # 在对话框中找发布按钮（多种可能性）
     dialog_publish_selectors = [
+        'button.publish-btn.byte-btn-primary:has-text("预览并发布")',
+        'button.byte-btn-primary:has-text("预览并发布")',
+        'button.publish-btn.byte-btn-primary:has-text("发布")',
         '.byte-modal button:has-text("发布")',
         '.byte-dialog button:has-text("发布")',
         'button:has-text("确认发布")',
         'button:has-text("发布")',
         '[class*="dialog"] button:has-text("发布")',
     ]
+    dialog_clicked = False
     for sel in dialog_publish_selectors:
         try:
             btn = page.locator(sel).first
             if btn.is_visible(timeout=3000):
-                btn.click()
-                print(f"在对话框中点击了发布（选择器: {sel}）")
-                time.sleep(2)
+                # 用 JS 原生 MouseEvent 派发，确保 Vue 事件处理器能响应
+                result = page.evaluate(f"""
+                    () => {{
+                        const sel = {sel!r};
+                        const el = document.querySelector(sel) || [...document.querySelectorAll('button')].find(b => b.innerText.includes('发布'));
+                        if (!el) return 'NOT_FOUND';
+                        const rect = el.getBoundingClientRect();
+                        const cx = rect.left + rect.width / 2;
+                        const cy = rect.top + rect.height / 2;
+                        ['mousedown', 'mouseup', 'click'].forEach(name => {{
+                            el.dispatchEvent(new MouseEvent(name, {{
+                                bubbles: true, cancelable: true,
+                                clientX: cx, clientY: cy, button: 0
+                            }}));
+                        }});
+                        return 'CLICKED:' + el.innerText.trim().slice(0, 20);
+                    }}
+                """)
+                print(f"在对话框中点击了发布（选择器: {sel}）, 结果: {result}")
+                time.sleep(3)
+                dialog_clicked = True
                 break
         except:
             continue
 
-    # ========== 第三步：处理后续的各种弹窗 ==========
-    time.sleep(2)
+    if not dialog_clicked:
+        # JS 兜底：找所有含"发布"的 button，点击 primary 的那个
+        result = page.evaluate("""
+            () => {
+                const buttons = [...document.querySelectorAll('button')].filter(b =>
+                    b.offsetParent !== null && b.innerText.includes('发布')
+                );
+                // 优先点 primary 按钮
+                const primary = buttons.find(b => b.className.includes('primary'));
+                const target = primary || buttons[0];
+                if (!target) return 'NOT_FOUND';
+                const rect = target.getBoundingClientRect();
+                const cx = rect.left + rect.width / 2;
+                const cy = rect.top + rect.height / 2;
+                ['mousedown', 'mouseup', 'click'].forEach(name => {
+                    target.dispatchEvent(new MouseEvent(name, {
+                        bubbles: true, cancelable: true,
+                        clientX: cx, clientY: cy, button: 0
+                    }));
+                });
+                return 'FALLBACK_CLICKED:' + target.innerText.trim().slice(0, 30);
+            }
+        """)
+        print(f"对话框发布按钮 JS 兜底: {result}")
+        time.sleep(3)
 
-    # 使用 JS 点击各类确认弹窗按钮
+    # ========== 第三步：等待发布结果，先检测成功再关弹窗 ==========
+    # 发布后页面可能跳转或弹出成功提示，先等几秒让响应完成
+    time.sleep(3)
+
+    # 诊断：截图 + dump 当前所有可见按钮和对话框
+    diag_path = f"diag_after_confirm_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+    page.screenshot(path=diag_path, full_page=True)
+    print(f"确认发布后截图: {diag_path}")
+
+    diag_info = page.evaluate("""
+        () => {
+            const result = { url: location.href, dialogs: [], visible_buttons: [] };
+            // 检查所有可能的弹窗
+            const dialogSels = ['.byte-modal', '.byte-dialog', '.byte-drawer', '[class*="dialog"]', '[class*="modal"]', '[role="dialog"]'];
+            for (const sel of dialogSels) {
+                const el = document.querySelector(sel);
+                if (el && el.offsetParent !== null) {
+                    result.dialogs.push({ sel, text: el.innerText?.slice(0, 200), w: el.offsetWidth, h: el.offsetHeight });
+                }
+            }
+            // 所有可见按钮
+            const buttons = [...document.querySelectorAll('button')].filter(b => b.offsetParent !== null);
+            result.visible_buttons = buttons.map(b => ({ text: b.innerText?.trim()?.slice(0, 100), cls: b.className?.slice(0, 80) }));
+            return result;
+        }
+    """)
+    print(f"确认发布后页面状态: url={diag_info.get('url', '?')}")
+    print(f"  可见弹窗: {diag_info.get('dialogs', [])}")
+    print(f"  可见按钮: {diag_info.get('visible_buttons', [])}")
+
+    # 先检查是否发布成功，成功的话截图保存证据
+    success_hints = ["发布成功", "已发布", "提交成功", "操作成功", "审核"]
+    content = page.content()
+    already_success = False
+    for hint in success_hints:
+        if hint in content:
+            print(f"检测到发布成功提示: {hint}")
+            already_success = True
+            break
+
+    if already_success:
+        # 成功后如果有"我知道了"按钮，点掉即可
+        try:
+            page.evaluate("""
+                () => {
+                    const buttons = [...document.querySelectorAll('button, span, div[role="button"], a')];
+                    const target = buttons.find(el => el.innerText.trim() === '我知道了');
+                    if (target) target.click();
+                }
+            """)
+        except:
+            pass
+        return
+
+    # 还没检测到成功，逐个处理弹窗按钮（但"我知道了"可能是成功弹窗，先跳过它检测成功）
     js_click_button_texts = [
-        "我知道了",
         "确定",
         "确认发布",
         "发布",
@@ -1255,18 +1361,46 @@ def _click_publish(page: Page) -> None:
         except:
             pass
 
+    # 再次检查成功提示（"我知道了"按钮出现往往意味着成功）
+    time.sleep(2)
+    for hint in success_hints:
+        if hint in page.content():
+            print(f"二次检测到发布成功提示: {hint}")
+            already_success = True
+            break
+
+    # 检查是否有"我知道了"按钮（通常是成功后的确认按钮）
+    try:
+        clicked = page.evaluate("""
+            () => {
+                const buttons = [...document.querySelectorAll('button, span, div[role="button"], a')];
+                const target = buttons.find(el => el.innerText.trim() === '我知道了');
+                if (target) {
+                    target.click();
+                    return true;
+                }
+                return false;
+            }
+        """)
+        if clicked:
+            print("JS 点击了按钮: 我知道了（成功确认）")
+            time.sleep(1)
+    except:
+        pass
+
     # 最后再按 ESC 清除残留弹窗
     page.keyboard.press("Escape")
     time.sleep(0.5)
     page.keyboard.press("Escape")
     time.sleep(0.5)
 
-    # ========== 第四步：验证是否成功（检测成功提示） ==========
-    success_hints = ["发布成功", "已发布", "提交成功", "操作成功"]
-    content = page.content()
+    if already_success:
+        return
+
+    # ========== 第四步：最终验证 ==========
     for hint in success_hints:
-        if hint in content:
-            print(f"检测到发布成功提示: {hint}")
+        if hint in page.content():
+            print(f"最终检测到发布成功提示: {hint}")
             return
 
     print("发布操作完成，等待后续确认...")
@@ -1303,22 +1437,56 @@ def _wait_for_success(page: Page, timeout: int = 30) -> str:
         "审核",
         "提交成功",
         "操作成功",
+        "内容管理",       # 发布后可能跳转到内容管理页
+        "作品管理",
+        "文章管理",
     ]
+    start_url = page.url
+    print(f"等待发布结果（当前 URL: {start_url}）...")
+
     deadline = time.time() + timeout
     while time.time() < deadline:
+        current_url = page.url
+
+        # 检查 URL 是否变化（发布成功后通常会跳转）
+        if current_url != start_url:
+            path = f"success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+            page.screenshot(path=path, full_page=True)
+            print(f"页面已跳转: {start_url} -> {current_url}")
+            print(f"发布成功截图: {path}")
+            return path
+
+        # 检查页面内容中的成功提示
         content = page.content()
         for hint in success_hints:
             if hint in content:
                 path = f"success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
                 page.screenshot(path=path, full_page=True)
-                print(f"发布成功截图: {path}")
+                print(f"检测到成功提示「{hint}」，截图: {path}")
                 return path
+
+        # 检查"我知道了"按钮（出现即表示成功）
+        try:
+            has_btn = page.evaluate("""
+                () => {
+                    const buttons = [...document.querySelectorAll('button, span, div[role="button"], a')];
+                    return buttons.some(el => el.innerText.trim() === '我知道了');
+                }
+            """)
+            if has_btn:
+                path = f"success_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                page.screenshot(path=path, full_page=True)
+                print(f"检测到「我知道了」按钮，发布成功。截图: {path}")
+                return path
+        except:
+            pass
+
         time.sleep(1)
 
     # 超时也保存一张截图
     path = f"result_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
     page.screenshot(path=path, full_page=True)
-    print(f"未检测到明确成功提示，已截图: {path}")
+    print(f"超时未检测到成功（当前 URL: {page.url}），已截图: {path}")
     return path
 
 
