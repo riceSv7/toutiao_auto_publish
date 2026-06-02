@@ -454,54 +454,87 @@ def _click_cover_add_button(page: Page) -> bool:
     直接 force-click .article-cover-add（诊断确认：154x120 的可见 div）。
     如果失败，回退到 Tab 键盘导航。
     """
-    # 方案A：直接点击 .article-cover-add（诊断数据确认这个元素就是封面添加区）
+    # 方案A：用 JS 原生事件点击封面添加区域
     try:
-        add_div = page.locator('.article-cover-add').first
-        if add_div.count() > 0 and add_div.is_visible(timeout=3000):
-            add_div.scroll_into_view_if_needed()
-            add_div.click(force=True)
-            print("[封面] 直接点击 .article-cover-add 成功")
-            time.sleep(3)
-            # 诊断：dump 点击后页面上所有弹窗/面板元素
-            modal_info = page.evaluate("""
-                () => {
-                    const results = [];
-                    const selectors = ['modal', 'dialog', 'drawer', 'popup', 'panel', 'overlay'];
-                    for (const s of selectors) {
-                        const els = document.querySelectorAll('[class*="' + s + '"]');
-                        for (const el of els) {
-                            const rect = el.getBoundingClientRect();
-                            if (rect.width > 100 || rect.height > 100) {
-                                results.push({
-                                    tag: el.tagName.toLowerCase(),
-                                    cls: (el.className || '').toString().substring(0, 60),
-                                    text: (el.textContent || '').trim().substring(0, 80),
-                                    w: Math.round(rect.width),
-                                    h: Math.round(rect.height),
-                                    vis: el.offsetParent !== null
-                                });
-                            }
+        result = page.evaluate("""
+            () => {
+                // 尝试多个可能的封面触发元素
+                const selectors = [
+                    '.article-cover-add',
+                    '.article-cover-images',
+                    '.article-cover-images-wrap',
+                    '.article-cover-preview',
+                    '.pgc-figure-cover-preview',
+                ];
+                for (const sel of selectors) {
+                    const el = document.querySelector(sel);
+                    if (!el) continue;
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width === 0 || rect.height === 0) continue;
+                    // 用原生 MouseEvent 触发（兼容 Vue/React）
+                    const cx = rect.left + rect.width / 2;
+                    const cy = rect.top + rect.height / 2;
+                    ['mousedown', 'mouseup', 'click'].forEach(name => {
+                        el.dispatchEvent(new MouseEvent(name, {
+                            bubbles: true, cancelable: true,
+                            clientX: cx, clientY: cy, button: 0
+                        }));
+                    });
+                    return 'CLICKED:' + sel + ' ' + rect.width + 'x' + rect.height;
+                }
+                return 'NOT_FOUND';
+            }
+        """)
+        print(f"[封面] JS 事件点击结果: {result}")
+        time.sleep(3)
+
+        # 诊断：检查点击后是否有弹窗出现
+        modal_info = page.evaluate("""
+            () => {
+                const results = [];
+                const selectors = ['modal', 'dialog', 'drawer', 'popup', 'overlay', 'muse'];
+                for (const s of selectors) {
+                    const els = document.querySelectorAll('[class*="' + s + '"]');
+                    for (const el of els) {
+                        const rect = el.getBoundingClientRect();
+                        if (rect.width > 200 || rect.height > 200) {
+                            results.push({
+                                tag: el.tagName.toLowerCase(),
+                                cls: (el.className || '').toString().substring(0, 80),
+                                text: (el.textContent || '').trim().substring(0, 80),
+                                w: Math.round(rect.width),
+                                h: Math.round(rect.height),
+                                vis: el.offsetParent !== null
+                            });
                         }
                     }
-                    return JSON.stringify(results, null, 2);
                 }
-            """)
-            print(f"[封面] 点击后弹窗诊断: {modal_info}")
-            # 截图看点击后的页面状态
-            page.screenshot(path=f"cover_after_click_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
-            # 检查弹窗是否打开
-            try:
-                if page.locator('.byte-modal, .muse-dialog, [class*="modal"]').first.is_visible(timeout=3000):
-                    print("[封面] 素材弹窗已打开")
-                    return True
-            except:
-                pass
-            # 也检查是否有图片选择面板出现（可能不是 byte-modal）
-            if page.locator('[class*="dialog"]:visible, [class*="panel"]:visible, [class*="popup"]:visible').first.count() > 0:
-                print("[封面] 检测到弹窗/面板（非 byte-modal），假定已打开")
+                return JSON.stringify(results, null, 2);
+            }
+        """)
+        print(f"[封面] 点击后弹窗诊断: {modal_info}")
+        page.screenshot(path=f"cover_after_click_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+
+        # 检查弹窗是否打开
+        if page.locator('[class*="modal"]:visible, [class*="dialog"]:visible, [class*="drawer"]:visible').first.count() > 0:
+            # 确认不是页面本身的 garr-panel
+            is_real_modal = page.evaluate("""() => {
+                const els = document.querySelectorAll('[class*="modal"]:not([class*="garr"]), [class*="dialog"]:not([class*="garr"]), [class*="drawer"]:not([class*="sticky"])');
+                for (const el of els) {
+                    if (el.offsetParent !== null) {
+                        const r = el.getBoundingClientRect();
+                        if (r.width > 200 && r.height > 200 && r.width < window.innerWidth) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            }""")
+            if is_real_modal:
+                print("[封面] 素材弹窗已打开")
                 return True
     except Exception as e:
-        print(f"[封面] 直接点击 .article-cover-add 失败: {e}")
+        print(f"[封面] 方案A JS 事件点击失败: {e}")
 
     # 方案B：点击包含"预览"文字的封面区域
     try:
