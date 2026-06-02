@@ -368,14 +368,16 @@ def _set_cover(page: Page) -> None:
         return
     time.sleep(3)
 
-    # 步骤 2：切换到「免费正版图片」tab
-    print("[封面] 步骤2 - 切换到「免费正版图片」tab...")
-    _switch_to_free_tab_in_modal(page)
-    time.sleep(2)
-
-    # 步骤 3：搜索关键词 + 点击图片
-    print("[封面] 步骤3 - 搜索关键词并点击图片...")
-    img_clicked = _search_and_click_image_in_modal(page, keywords=["情感", "深夜", "女性", "婚姻", "伤感"])
+    # 步骤 2：直接上传本地图片 cover.jpg
+    print("[封面] 步骤2 - 上传本地图片...")
+    img_clicked = _upload_local_cover(page)
+    if not img_clicked:
+        # 上传失败，回退到搜索图库的方式
+        print("[封面] 步骤2b - 切换免费正版图片tab...")
+        _switch_to_free_tab_in_modal(page)
+        time.sleep(2)
+        print("[封面] 步骤3 - 搜索关键词并点击图片...")
+        img_clicked = _search_and_click_image_in_modal(page, keywords=["情感", "深夜", "女性", "婚姻", "伤感"])
 
     # 步骤 4：点击「确定」按钮确认选图
     if img_clicked:
@@ -759,6 +761,66 @@ def _click_cover_image_in_modal(page: Page) -> bool:
             return True
     except Exception as e:
         print(f"[封面] JS 兜底选图异常: {e}")
+
+    return False
+
+
+def _upload_local_cover(page: Page) -> bool:
+    """在打开的抽屉中直接上传本地 cover.jpg"""
+    import os as _os
+    cover_path = _os.path.join(_os.path.dirname(__file__), "cover.jpg")
+    if not _os.path.exists(cover_path):
+        print(f"[封面] 本地图片不存在: {cover_path}")
+        return False
+
+    print(f"[封面] 准备上传: {cover_path}")
+
+    # 方法1：找到隐藏的 file input 直接传文件
+    try:
+        file_input = page.locator('input[type="file"]').first
+        if file_input.count() > 0:
+            file_input.set_input_files(cover_path)
+            print("[封面] 已选择本地文件，等待上传...")
+            time.sleep(5)
+            # 检查是否上传成功（看看页面有没有变化）
+            return True
+    except Exception as e:
+        print(f"[封面] file input 上传失败: {e}")
+
+    # 方法2：点击"本地上传"按钮触发文件选择
+    try:
+        upload_btn = page.locator('text=本地上传').first
+        if upload_btn.count() > 0 and upload_btn.is_visible(timeout=3000):
+            # 监听文件选择对话框
+            with page.expect_file_chooser() as fc_info:
+                upload_btn.click()
+            file_chooser = fc_info.value
+            file_chooser.set_files(cover_path)
+            print("[封面] 通过文件选择器上传")
+            time.sleep(5)
+            return True
+    except Exception as e:
+        print(f"[封面] 本地上传按钮失败: {e}")
+
+    # 方法3：找所有 file input（包括隐藏的）
+    try:
+        result = page.evaluate("""
+            (path) => {
+                const inputs = document.querySelectorAll('input[type="file"]');
+                if (inputs.length > 0) {
+                    // 返回找到的 input 信息
+                    const info = [];
+                    inputs.forEach((inp, i) => {
+                        info.push('input[' + i + ']: ' + (inp.className || '') + ' accept=' + (inp.accept || ''));
+                    });
+                    return JSON.stringify(info);
+                }
+                return 'no file inputs';
+            }
+        """, cover_path)
+        print(f"[封面] 页面 file inputs: {result}")
+    except:
+        pass
 
     return False
 
