@@ -368,13 +368,34 @@ def _set_cover(page: Page) -> None:
         return
     time.sleep(3)
 
-    # 步骤 2：弹窗已打开，直接用 JS 点击第一张可见图片
+    # 步骤 2：弹窗已打开，在弹窗/面板内找第一张可见大图
     print("[封面] 步骤2 - 弹窗内选图...")
     img_clicked = False
     try:
-        page.wait_for_selector('.byte-modal img', state='visible', timeout=5000)
+        # 等待任意可见弹窗内的 img 出现
+        page.wait_for_selector('[class*="modal"] img, [class*="dialog"] img, [class*="panel"] img, [class*="drawer"] img', state='visible', timeout=8000)
         time.sleep(2)
-        page.evaluate("() => { const imgs = document.querySelectorAll('.byte-modal img'); for (const img of imgs) { if (img.offsetParent !== null) { img.click(); break; } } }")
+        page.evaluate("""
+            () => {
+                const containers = document.querySelectorAll('[class*="modal"], [class*="dialog"], [class*="panel"], [class*="drawer"]');
+                for (const c of containers) {
+                    if (c.offsetParent === null) continue;
+                    const rect = c.getBoundingClientRect();
+                    if (rect.width < 200 || rect.height < 200) continue;
+                    const imgs = c.querySelectorAll('img[src]');
+                    for (const img of imgs) {
+                        if (img.offsetParent === null) continue;
+                        const ir = img.getBoundingClientRect();
+                        if (ir.width >= 80 && ir.height >= 60) {
+                            const src = (img.src || '').toLowerCase();
+                            if (src.includes('data:') || src.includes('.svg') || src.includes('icon') || src.includes('avatar')) continue;
+                            img.click();
+                            return;
+                        }
+                    }
+                }
+            }
+        """)
         print("[封面] 已点击弹窗内第一张图片")
         time.sleep(2)
         img_clicked = True
@@ -387,9 +408,28 @@ def _set_cover(page: Page) -> None:
         _search_cover_image(page, keywords=["情感", "深夜", "女性", "婚姻", "伤感"])
         time.sleep(2)
         try:
-            page.wait_for_selector('.byte-modal img', state='visible', timeout=5000)
+            page.wait_for_selector('[class*="modal"] img, [class*="dialog"] img, [class*="panel"] img, [class*="drawer"] img', state='visible', timeout=5000)
             time.sleep(2)
-            page.evaluate("() => { const imgs = document.querySelectorAll('.byte-modal img'); for (const img of imgs) { if (img.offsetParent !== null) { img.click(); break; } } }")
+            page.evaluate("""
+                () => {
+                    const containers = document.querySelectorAll('[class*="modal"], [class*="dialog"], [class*="panel"], [class*="drawer"]');
+                    for (const c of containers) {
+                        if (c.offsetParent === null) continue;
+                        const rect = c.getBoundingClientRect();
+                        if (rect.width < 200 || rect.height < 200) continue;
+                        const imgs = c.querySelectorAll('img[src]');
+                        for (const img of imgs) {
+                            if (img.offsetParent === null) continue;
+                            const ir = img.getBoundingClientRect();
+                            if (ir.width < 80 || ir.height < 60) continue;
+                            const src = (img.src || '').toLowerCase();
+                            if (src.includes('data:') || src.includes('.svg') || src.includes('icon') || src.includes('avatar')) continue;
+                            img.click();
+                            return;
+                        }
+                    }
+                }
+            """)
             print("[封面] 搜索后已点击弹窗内第一张图片")
             time.sleep(2)
             img_clicked = True
