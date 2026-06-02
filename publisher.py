@@ -875,80 +875,40 @@ def _search_and_click_image_in_modal(page: Page, keywords: list) -> bool:
 
 
 def _find_and_click_image_in_container(page: Page, container_sel: str) -> bool:
-    """用 Playwright locator 在指定容器内找第一张真实图片并点击"""
-    # 方法1: 直接用 locator 找所有 img 标签
-    imgs = page.locator(f'{container_sel} img[src]')
-    count = imgs.count()
-    print(f"[封面] 容器内 img 数量: {count}")
-    for i in range(min(count, 50)):
-        try:
-            img = imgs.nth(i)
-            if not img.is_visible(timeout=1000):
-                continue
-            box = img.bounding_box()
-            if not box or box['width'] < 80 or box['height'] < 60:
-                continue
-            src = (img.get_attribute('src') or '').lower()
-            if any(s in src for s in ['data:', '.svg', 'icon', 'avatar', 'gif;base64']):
-                continue
-            img.scroll_into_view_if_needed()
-            img.click(force=True)
-            print(f"[封面] 点击 img[{i}]: {box['width']}x{box['height']}")
-            time.sleep(2)
-            return True
-        except:
-            continue
-
-    # 方法2: 找背景图片的元素（可能图片是 background-image）
-    divs = page.locator(f'{container_sel} div')
-    div_count = divs.count()
-    for i in range(min(div_count, 100)):
-        try:
-            d = divs.nth(i)
-            if not d.is_visible(timeout=500):
-                continue
-            box = d.bounding_box()
-            if not box or box['width'] < 100 or box['height'] < 80:
-                continue
-            # 检查是否有背景图
-            bg = d.evaluate("el => window.getComputedStyle(el).backgroundImage")
-            if bg and bg != 'none' and 'url(' in bg and 'data:' not in bg:
-                d.scroll_into_view_if_needed()
-                d.click(force=True)
-                print(f"[封面] 点击带背景图的 div[{i}]: {box['width']}x{box['height']}")
-                time.sleep(2)
-                return True
-        except:
-            continue
-
-    # 方法3: JS 兜底 —— dump 所有大尺寸可见元素并尝试点击
+    """在抽屉内找带真实背景图的图片并点击（头条用 CSS background-image 显示图片）"""
     result = page.evaluate("""
         (sel) => {
             const container = document.querySelector(sel);
             if (!container) return 'no container';
-            // 遍历所有元素，找大尺寸可见的
             const all = container.querySelectorAll('*');
             for (const el of all) {
-                if (el.offsetParent === null) continue;
-                const r = el.getBoundingClientRect();
-                if (r.width < 100 || r.height < 80) continue;
-                if (r.width > 500 || r.height > 500) continue; // 跳过容器本身
-                const tag = el.tagName.toLowerCase();
-                const cls = (el.className || '').toString();
-                const txt = (el.textContent || '').trim().substring(0, 30);
-                // 检查是否有 img 子元素或背景图
-                const hasImg = el.querySelector('img[src]');
                 const bg = window.getComputedStyle(el).backgroundImage;
-                const hasBg = bg && bg !== 'none' && bg.includes('url') && !bg.includes('data:');
-                if (hasImg || hasBg) {
-                    el.click();
-                    return 'clicked ' + tag + ' .' + cls.substring(0,40) + ' ' + r.width + 'x' + r.height + ' ' + txt;
+                if (!bg || bg === 'none' || bg.includes('data:')) continue;
+                if (!bg.includes('url(')) continue;
+                // 元素本身可能是 0x0（IMG.btn.image-border），往上找有尺寸的父元素点击
+                let target = el;
+                let tr = el.getBoundingClientRect();
+                if (tr.width < 50 || tr.height < 50) {
+                    let p = el.parentElement;
+                    while (p && p !== container) {
+                        const pr = p.getBoundingClientRect();
+                        if (pr.width >= 80 && pr.height >= 60) {
+                            target = p;
+                            tr = pr;
+                            break;
+                        }
+                        p = p.parentElement;
+                    }
+                }
+                if (tr.width >= 80 && tr.height >= 60) {
+                    target.click();
+                    return 'clicked ' + target.tagName + '.' + (target.className||'').substring(0,40) + ' ' + tr.width + 'x' + tr.height + ' ' + bg.substring(0, 60);
                 }
             }
             return 'not found';
         }
     """, container_sel)
-    print(f"[封面] JS 兜底结果: {result}")
+    print(f"[封面] 背景图查找: {result}")
     if result.startswith('clicked'):
         time.sleep(2)
         return True
