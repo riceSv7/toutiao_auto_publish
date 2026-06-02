@@ -794,7 +794,36 @@ def _search_and_click_image_in_modal(page: Page, keywords: list) -> bool:
     """在弹窗内搜索关键词并点击第一张图片"""
     # 先尝试搜索
     _search_cover_image(page, keywords)
-    time.sleep(2)
+    time.sleep(3)  # 等搜索结果加载
+
+    # 诊断：dump 抽屉内所有图片和可点击元素
+    drawer_info = page.evaluate("""
+        () => {
+            const results = [];
+            const drawer = document.querySelector('.byte-drawer');
+            if (!drawer) return 'no drawer';
+            const imgs = drawer.querySelectorAll('img[src]');
+            results.push('total imgs: ' + imgs.length);
+            imgs.forEach((img, i) => {
+                const r = img.getBoundingClientRect();
+                results.push('img[' + i + ']: ' + r.width + 'x' + r.height + ' vis=' + (img.offsetParent !== null) + ' src=' + (img.src || '').substring(0, 80));
+            });
+            // 也检查所有大尺寸 div（可能是图片容器）
+            const divs = drawer.querySelectorAll('div');
+            let bigDivs = 0;
+            divs.forEach(d => {
+                const r = d.getBoundingClientRect();
+                if (r.width >= 100 && r.height >= 80 && d.offsetParent !== null) {
+                    bigDivs++;
+                    if (bigDivs <= 5) {
+                        results.push('bigDiv: ' + (d.className || '').substring(0, 60) + ' ' + r.width + 'x' + r.height);
+                    }
+                }
+            });
+            return JSON.stringify(results);
+        }
+    """)
+    print(f"[封面] 搜索后抽屉诊断: {drawer_info}")
 
     # 在弹窗内查找并点击图片
     try:
