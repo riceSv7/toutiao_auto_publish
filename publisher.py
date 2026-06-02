@@ -368,84 +368,30 @@ def _set_cover(page: Page) -> None:
         return
     time.sleep(3)
 
-    # 步骤 2：弹窗已打开，在弹窗/面板内找第一张可见大图
-    print("[封面] 步骤2 - 弹窗内选图...")
-    img_clicked = False
-    try:
-        # 等待任意可见弹窗内的 img 出现
-        page.wait_for_selector('[class*="modal"] img, [class*="dialog"] img, [class*="panel"] img, [class*="drawer"] img', state='visible', timeout=8000)
-        time.sleep(2)
-        page.evaluate("""
-            () => {
-                const containers = document.querySelectorAll('[class*="modal"], [class*="dialog"], [class*="panel"], [class*="drawer"]');
-                for (const c of containers) {
-                    if (c.offsetParent === null) continue;
-                    const rect = c.getBoundingClientRect();
-                    if (rect.width < 200 || rect.height < 200) continue;
-                    const imgs = c.querySelectorAll('img[src]');
-                    for (const img of imgs) {
-                        if (img.offsetParent === null) continue;
-                        const ir = img.getBoundingClientRect();
-                        if (ir.width >= 80 && ir.height >= 60) {
-                            const src = (img.src || '').toLowerCase();
-                            if (src.includes('data:') || src.includes('.svg') || src.includes('icon') || src.includes('avatar')) continue;
-                            img.click();
-                            return;
-                        }
-                    }
-                }
-            }
-        """)
-        print("[封面] 已点击弹窗内第一张图片")
-        time.sleep(2)
-        img_clicked = True
-    except Exception as e:
-        print(f"[封面] 弹窗内选图失败: {e}")
+    # 步骤 2：切换到「免费正版图片」tab
+    print("[封面] 步骤2 - 切换到「免费正版图片」tab...")
+    _switch_to_free_tab_in_modal(page)
+    time.sleep(2)
 
-    # 步骤 3：没找到图片 → 尝试先用关键词搜索
-    if not img_clicked:
-        print("[封面] 步骤3 - 未直接找到图片，尝试关键词搜索...")
-        _search_cover_image(page, keywords=["情感", "深夜", "女性", "婚姻", "伤感"])
-        time.sleep(2)
-        try:
-            page.wait_for_selector('[class*="modal"] img, [class*="dialog"] img, [class*="panel"] img, [class*="drawer"] img', state='visible', timeout=5000)
-            time.sleep(2)
-            page.evaluate("""
-                () => {
-                    const containers = document.querySelectorAll('[class*="modal"], [class*="dialog"], [class*="panel"], [class*="drawer"]');
-                    for (const c of containers) {
-                        if (c.offsetParent === null) continue;
-                        const rect = c.getBoundingClientRect();
-                        if (rect.width < 200 || rect.height < 200) continue;
-                        const imgs = c.querySelectorAll('img[src]');
-                        for (const img of imgs) {
-                            if (img.offsetParent === null) continue;
-                            const ir = img.getBoundingClientRect();
-                            if (ir.width < 80 || ir.height < 60) continue;
-                            const src = (img.src || '').toLowerCase();
-                            if (src.includes('data:') || src.includes('.svg') || src.includes('icon') || src.includes('avatar')) continue;
-                            img.click();
-                            return;
-                        }
-                    }
-                }
-            """)
-            print("[封面] 搜索后已点击弹窗内第一张图片")
-            time.sleep(2)
-            img_clicked = True
-        except Exception as e:
-            print(f"[封面] 搜索后选图失败: {e}")
+    # 步骤 3：搜索关键词 + 点击图片
+    print("[封面] 步骤3 - 搜索关键词并点击图片...")
+    img_clicked = _search_and_click_image_in_modal(page, keywords=["情感", "深夜", "女性", "婚姻", "伤感"])
 
-    # 步骤 4：终极兜底 —— JS 深度查找任意大尺寸图片
+    # 步骤 4：点击「确定」按钮确认选图
+    if img_clicked:
+        print("[封面] 步骤4 - 点击确定按钮...")
+        _click_confirm_in_modal(page)
+        time.sleep(2)
+
+    # 步骤 5：终极兜底 —— JS 深度查找任意大尺寸图片
     if not img_clicked:
-        print("[封面] 步骤4 - JS 深度搜索大尺寸图片...")
-        img_clicked = _click_any_large_image_js(page)
+        print("[封面] 步骤5 - 兜底：JS 深度搜索大尺寸图片...")
 
     if not img_clicked:
         print("[封面] 所有方式都未找到可选图片！")
         page.screenshot(path="cover_no_img_{}.png".format(datetime.now().strftime('%Y%m%d_%H%M%S')))
 
-    # 步骤 5：验证封面是否设置成功（图片选中后面板通常自动关闭）
+    # 步骤 6：验证封面是否设置成功（图片选中后面板通常自动关闭）
     time.sleep(3)
     # 处理面板未自动关闭的情况
     try:
@@ -754,6 +700,101 @@ def _click_cover_image_in_modal(page: Page) -> bool:
     except Exception as e:
         print(f"[封面] JS 兜底选图异常: {e}")
 
+    return False
+
+
+def _switch_to_free_tab_in_modal(page: Page) -> bool:
+    """在素材弹窗内切换到「免费正版图片」tab"""
+    free_tab_selectors = [
+        'text=免费正版图片',
+        'text=正版图片',
+        'text=正版图库',
+        'text=免费图片',
+        '[class*="tab"]:has-text("免费")',
+        '[class*="tab"]:has-text("正版")',
+        '[role="tab"]:has-text("免费")',
+        'div:has-text("免费正版")',
+        'span:has-text("免费正版")',
+    ]
+    for sel in free_tab_selectors:
+        try:
+            tab = page.locator(sel).first
+            if tab.count() > 0 and tab.is_visible(timeout=3000):
+                tab.click()
+                print(f"[封面] 已切换到「免费正版图片」tab ({sel})")
+                time.sleep(2)
+                return True
+        except:
+            continue
+    print("[封面] 未找到「免费正版图片」tab，假定已在正确 tab")
+    return False
+
+
+def _search_and_click_image_in_modal(page: Page, keywords: list) -> bool:
+    """在弹窗内搜索关键词并点击第一张图片"""
+    # 先尝试搜索
+    _search_cover_image(page, keywords)
+    time.sleep(2)
+
+    # 在弹窗内查找并点击图片
+    try:
+        page.wait_for_selector('[class*="modal"] img, [class*="dialog"] img, [class*="panel"] img, [class*="drawer"] img', state='visible', timeout=8000)
+        time.sleep(2)
+        result = page.evaluate("""
+            () => {
+                const containers = document.querySelectorAll('[class*="modal"], [class*="dialog"], [class*="panel"], [class*="drawer"]');
+                for (const c of containers) {
+                    if (c.offsetParent === null) continue;
+                    const rect = c.getBoundingClientRect();
+                    if (rect.width < 200 || rect.height < 200) continue;
+                    const imgs = c.querySelectorAll('img[src]');
+                    for (const img of imgs) {
+                        if (img.offsetParent === null) continue;
+                        const ir = img.getBoundingClientRect();
+                        if (ir.width < 80 || ir.height < 60) continue;
+                        const src = (img.src || '').toLowerCase();
+                        if (src.includes('data:') || src.includes('.svg') || src.includes('icon') || src.includes('avatar')) continue;
+                        img.click();
+                        return 'clicked ' + ir.width + 'x' + ir.height;
+                    }
+                }
+                return 'not found';
+            }
+        """)
+        if result.startswith('clicked'):
+            print(f"[封面] 已点击弹窗内图片 ({result})")
+            time.sleep(2)
+            return True
+        print(f"[封面] 弹窗内未找到合适图片: {result}")
+        return False
+    except Exception as e:
+        print(f"[封面] 弹窗内选图异常: {e}")
+        return False
+
+
+def _click_confirm_in_modal(page: Page) -> bool:
+    """在弹窗内点击「确定」按钮确认选图"""
+    confirm_selectors = [
+        'button:has-text("确定")',
+        'button:has-text("确认")',
+        'span:has-text("确定")',
+        'div:has-text("确定")',
+        '[class*="modal"] button:has-text("确定")',
+        '[class*="dialog"] button:has-text("确定")',
+        '[class*="footer"] button:has-text("确定")',
+        '.byte-modal button:has-text("确定")',
+    ]
+    for sel in confirm_selectors:
+        try:
+            btn = page.locator(sel).first
+            if btn.count() > 0 and btn.is_visible(timeout=3000):
+                btn.click()
+                print(f"[封面] 已点击确定按钮 ({sel})")
+                time.sleep(2)
+                return True
+        except:
+            continue
+    print("[封面] 未找到确定按钮，假定图片已自动选中")
     return False
 
 
