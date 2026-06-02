@@ -827,34 +827,80 @@ def _search_and_click_image_in_modal(page: Page, keywords: list) -> bool:
 
 
 def _find_and_click_image_in_container(page: Page, container_sel: str) -> bool:
-    """在指定容器内找第一张 >= 80x60 的真实图片并点击"""
+    """用 Playwright locator 在指定容器内找第一张真实图片并点击"""
+    # 方法1: 直接用 locator 找所有 img 标签
+    imgs = page.locator(f'{container_sel} img[src]')
+    count = imgs.count()
+    print(f"[封面] 容器内 img 数量: {count}")
+    for i in range(min(count, 50)):
+        try:
+            img = imgs.nth(i)
+            if not img.is_visible(timeout=1000):
+                continue
+            box = img.bounding_box()
+            if not box or box['width'] < 80 or box['height'] < 60:
+                continue
+            src = (img.get_attribute('src') or '').lower()
+            if any(s in src for s in ['data:', '.svg', 'icon', 'avatar', 'gif;base64']):
+                continue
+            img.scroll_into_view_if_needed()
+            img.click(force=True)
+            print(f"[封面] 点击 img[{i}]: {box['width']}x{box['height']}")
+            time.sleep(2)
+            return True
+        except:
+            continue
+
+    # 方法2: 找背景图片的元素（可能图片是 background-image）
+    divs = page.locator(f'{container_sel} div')
+    div_count = divs.count()
+    for i in range(min(div_count, 100)):
+        try:
+            d = divs.nth(i)
+            if not d.is_visible(timeout=500):
+                continue
+            box = d.bounding_box()
+            if not box or box['width'] < 100 or box['height'] < 80:
+                continue
+            # 检查是否有背景图
+            bg = d.evaluate("el => window.getComputedStyle(el).backgroundImage")
+            if bg and bg != 'none' and 'url(' in bg and 'data:' not in bg:
+                d.scroll_into_view_if_needed()
+                d.click(force=True)
+                print(f"[封面] 点击带背景图的 div[{i}]: {box['width']}x{box['height']}")
+                time.sleep(2)
+                return True
+        except:
+            continue
+
+    # 方法3: JS 兜底 —— dump 所有大尺寸可见元素并尝试点击
     result = page.evaluate("""
         (sel) => {
             const container = document.querySelector(sel);
             if (!container) return 'no container';
-            const imgs = container.querySelectorAll('img[src]');
-            for (const img of imgs) {
-                if (img.offsetParent === null) continue;
-                const ir = img.getBoundingClientRect();
-                if (ir.width < 80 || ir.height < 60) continue;
-                const src = (img.src || '').toLowerCase();
-                if (src.includes('data:') || src.includes('.svg') || src.includes('icon') || src.includes('avatar') || src.includes('gif;base64')) continue;
-                img.click();
-                return 'clicked ' + ir.width + 'x' + ir.height + ' ' + src.substring(0, 60);
-            }
-            // 也检查大尺寸 div（图片容器）
-            const divs = container.querySelectorAll('div');
-            for (const d of divs) {
-                const dr = d.getBoundingClientRect();
-                if (dr.width >= 120 && dr.height >= 100 && d.offsetParent !== null && d.querySelector('img[src]')) {
-                    d.click();
-                    return 'clicked_div ' + dr.width + 'x' + dr.height;
+            // 遍历所有元素，找大尺寸可见的
+            const all = container.querySelectorAll('*');
+            for (const el of all) {
+                if (el.offsetParent === null) continue;
+                const r = el.getBoundingClientRect();
+                if (r.width < 100 || r.height < 80) continue;
+                if (r.width > 500 || r.height > 500) continue; // 跳过容器本身
+                const tag = el.tagName.toLowerCase();
+                const cls = (el.className || '').toString();
+                const txt = (el.textContent || '').trim().substring(0, 30);
+                // 检查是否有 img 子元素或背景图
+                const hasImg = el.querySelector('img[src]');
+                const bg = window.getComputedStyle(el).backgroundImage;
+                const hasBg = bg && bg !== 'none' && bg.includes('url') && !bg.includes('data:');
+                if (hasImg || hasBg) {
+                    el.click();
+                    return 'clicked ' + tag + ' .' + cls.substring(0,40) + ' ' + r.width + 'x' + r.height + ' ' + txt;
                 }
             }
             return 'not found';
         }
     """, container_sel)
-    print(f"[封面] 容器内找图结果: {result}")
+    print(f"[封面] JS 兜底结果: {result}")
     if result.startswith('clicked'):
         time.sleep(2)
         return True
@@ -862,43 +908,9 @@ def _find_and_click_image_in_container(page: Page, container_sel: str) -> bool:
 
 
 def _search_in_drawer(page: Page, keywords: list) -> bool:
-    """在 byte-drawer 内搜索关键词"""
-    # 只找抽屉内的搜索框
-    search_selectors = [
-        '.byte-drawer input[placeholder*="搜索"]',
-        '.byte-drawer input[type="search"]',
-        '.byte-drawer input:not([type="hidden"])',
-    ]
-    for sel in search_selectors:
-        try:
-            si = page.locator(sel).first
-            if si.count() > 0 and si.is_visible(timeout=2000):
-                si.click()
-                time.sleep(0.3)
-                si.fill("")
-                time.sleep(0.2)
-                si.type(keywords[0], delay=50)
-                time.sleep(0.5)
-                page.keyboard.press("Enter")
-                print(f"[封面] 抽屉内搜索: {keywords[0]}")
-                time.sleep(3)
-                return True
-        except:
-            continue
-    # 兜底：用通用选择器但优先可见的
-    try:
-        si = page.locator('input[placeholder*="搜索"]').first
-        if si.count() > 0 and si.is_visible(timeout=2000):
-            si.click()
-            si.fill(keywords[0])
-            page.keyboard.press("Enter")
-            print(f"[封面] 兜底搜索: {keywords[0]}")
-            time.sleep(3)
-            return True
-    except:
-        pass
-    print("[封面] 未找到搜索框")
-    return False
+    """在抽屉内搜索关键词，直接复用已验证的通用搜索"""
+    # 直接使用已存在的通用搜索函数（之前测试中确认可用）
+    return _search_cover_image(page, keywords)
 
 
 def _click_confirm_in_modal(page: Page) -> bool:
