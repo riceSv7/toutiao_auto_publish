@@ -808,29 +808,53 @@ def _search_and_click_image_in_modal(page: Page, keywords: list) -> bool:
     except:
         pass
 
-    # 诊断：dump 抽屉内所有大尺寸可见元素
+    # 诊断：检查 iframe、canvas、所有 img
     dump = page.evaluate("""
         () => {
             const drawer = document.querySelector('.byte-drawer');
             if (!drawer) return 'no drawer';
             const results = [];
+
+            // 检查 iframe
+            const iframes = drawer.querySelectorAll('iframe');
+            results.push('iframes: ' + iframes.length);
+            iframes.forEach((f, i) => {
+                results.push('  iframe[' + i + '] src=' + (f.src || '').substring(0, 80) + ' ' + f.getBoundingClientRect().width + 'x' + f.getBoundingClientRect().height);
+            });
+
+            // 检查 canvas
+            const canvases = drawer.querySelectorAll('canvas');
+            results.push('canvases: ' + canvases.length);
+            canvases.forEach((c, i) => {
+                results.push('  canvas[' + i + '] ' + c.getBoundingClientRect().width + 'x' + c.getBoundingClientRect().height);
+            });
+
+            // 检查所有 img（包括 0x0 的）
+            const imgs = drawer.querySelectorAll('img');
+            results.push('all imgs: ' + imgs.length);
+            imgs.forEach((img, i) => {
+                const r = img.getBoundingClientRect();
+                const ns = img.naturalWidth || 0;
+                results.push('  img[' + i + ']: dom=' + r.width + 'x' + r.height + ' natural=' + ns + 'x' + (img.naturalHeight||0) + ' src=' + (img.src || '').substring(0, 80));
+            });
+
+            // 检查所有带 background-image 的元素
             const all = drawer.querySelectorAll('*');
+            let bgCount = 0;
             for (const el of all) {
-                if (el.offsetParent === null) continue;
-                const r = el.getBoundingClientRect();
-                if (r.width < 50 || r.height < 50) continue;
-                const tag = el.tagName.toLowerCase();
-                const cls = (el.className || '').toString().substring(0, 60);
-                const txt = (el.textContent || '').trim().substring(0, 40);
-                const hasImg = el.querySelector('img') ? 1 : 0;
                 const bg = window.getComputedStyle(el).backgroundImage;
-                const hasBg = (bg && bg !== 'none' && bg.includes('url')) ? 1 : 0;
-                results.push(tag + ' .' + cls + ' ' + r.width + 'x' + r.height + ' img:' + hasImg + ' bg:' + hasBg + ' "' + txt + '"');
+                if (bg && bg !== 'none' && bg.includes('url') && !bg.includes('data:')) {
+                    const r = el.getBoundingClientRect();
+                    results.push('  bg: ' + el.tagName + '.' + (el.className||'').substring(0,40) + ' ' + r.width + 'x' + r.height + ' ' + bg.substring(0, 80));
+                    bgCount++;
+                    if (bgCount >= 5) break;
+                }
             }
-            return JSON.stringify(results.slice(0, 30));
+
+            return JSON.stringify(results);
         }
     """)
-    print(f"[封面] 抽屉内大元素: {dump}")
+    print(f"[封面] 抽屉内容诊断: {dump}")
 
     # 在抽屉内查找真实图片
     result = _find_and_click_image_in_container(page, '.byte-drawer')
