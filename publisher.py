@@ -808,6 +808,30 @@ def _search_and_click_image_in_modal(page: Page, keywords: list) -> bool:
     except:
         pass
 
+    # 诊断：dump 抽屉内所有大尺寸可见元素
+    dump = page.evaluate("""
+        () => {
+            const drawer = document.querySelector('.byte-drawer');
+            if (!drawer) return 'no drawer';
+            const results = [];
+            const all = drawer.querySelectorAll('*');
+            for (const el of all) {
+                if (el.offsetParent === null) continue;
+                const r = el.getBoundingClientRect();
+                if (r.width < 50 || r.height < 50) continue;
+                const tag = el.tagName.toLowerCase();
+                const cls = (el.className || '').toString().substring(0, 60);
+                const txt = (el.textContent || '').trim().substring(0, 40);
+                const hasImg = el.querySelector('img') ? 1 : 0;
+                const bg = window.getComputedStyle(el).backgroundImage;
+                const hasBg = (bg && bg !== 'none' && bg.includes('url')) ? 1 : 0;
+                results.push(tag + ' .' + cls + ' ' + r.width + 'x' + r.height + ' img:' + hasImg + ' bg:' + hasBg + ' "' + txt + '"');
+            }
+            return JSON.stringify(results.slice(0, 30));
+        }
+    """)
+    print(f"[封面] 抽屉内大元素: {dump}")
+
     # 在抽屉内查找真实图片
     result = _find_and_click_image_in_container(page, '.byte-drawer')
     if result:
