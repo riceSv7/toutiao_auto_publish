@@ -510,20 +510,22 @@ def _ensure_single_image_checked(page: Page) -> None:
         'input[type="radio"][value*="单图"]',
         'input[type="radio"][value*="single"]',
     ]
+    import json as _json
     for sel in single_cover_selectors:
         try:
             el = page.locator(sel).first
             if el.count() > 0 and el.is_visible(timeout=2000):
                 # 检查是否已选中（通过 aria-checked 或 checked 属性）
-                is_checked = page.evaluate(f"""
-                    () => {{
-                        const el = document.querySelector('{sel.replace("'", "\\'")}');
+                safe_sel = _json.dumps(sel)
+                is_checked = page.evaluate("""
+                    (sel) => {
+                        const el = document.querySelector(sel);
                         if (!el) return false;
                         // 找到最近的 radio input
                         const radio = el.closest('label')?.querySelector('input[type="radio"]') || el;
-                        return radio.checked || radio.getAttribute('aria-checked') === 'true';
-                    }}
-                """)
+                        return !!(radio.checked || radio.getAttribute('aria-checked') === 'true');
+                    }
+                """, sel)
                 if not is_checked:
                     el.click()
                     print("✅ 已选中「单图」")
@@ -982,17 +984,17 @@ def _click_publish(page: Page) -> None:
     ]
     for text in js_click_button_texts:
         try:
-            clicked = page.evaluate(f"""
-                () => {{
+            clicked = page.evaluate("""
+                (text) => {
                     const buttons = [...document.querySelectorAll('button, span, div[role="button"], a')];
-                    const target = buttons.find(el => el.innerText.trim() === '{text}' || el.innerText.includes('{text}'));
-                    if (target) {{
+                    const target = buttons.find(el => el.innerText.trim() === text || el.innerText.includes(text));
+                    if (target) {
                         target.click();
                         return true;
-                    }}
+                    }
                     return false;
-                }}
-            """)
+                }
+            """, text)
             if clicked:
                 print(f"JS 点击了按钮: {text}")
                 time.sleep(1)
