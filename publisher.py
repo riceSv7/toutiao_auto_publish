@@ -464,63 +464,72 @@ def _ensure_single_image_checked(page: Page) -> None:
 
 def _click_cover_add_button(page: Page) -> bool:
     """
-    终极方案：使用键盘 Tab 键逐步聚焦到封面添加按钮，然后按 Enter 打开。
-    需要预先知道从页面顶部到封面按钮需要按多少次 Tab。
-    如果不知道，先用默认值尝试，并在日志中打印当前聚焦元素。
+    点击封面 + 号按钮打开素材面板。
+    直接 force-click .article-cover-add（诊断确认：154x120 的可见 div）。
+    如果失败，回退到 Tab 键盘导航。
     """
-    # 先确保焦点离开编辑器，点击页面顶部空白区域
+    # 方案A：直接点击 .article-cover-add（诊断数据确认这个元素就是封面添加区）
+    try:
+        add_div = page.locator('.article-cover-add').first
+        if add_div.count() > 0 and add_div.is_visible(timeout=3000):
+            add_div.scroll_into_view_if_needed()
+            add_div.click(force=True)
+            print("[封面] 直接点击 .article-cover-add 成功")
+            time.sleep(2)
+            # 检查弹窗是否打开
+            try:
+                if page.locator('.byte-modal, .muse-dialog, [class*="modal"]').first.is_visible(timeout=3000):
+                    print("[封面] 素材弹窗已打开")
+                    return True
+            except:
+                pass
+            # 也检查是否有图片选择面板出现（可能不是 byte-modal）
+            if page.locator('[class*="dialog"]:visible, [class*="panel"]:visible, [class*="popup"]:visible').first.count() > 0:
+                print("[封面] 检测到弹窗/面板（非 byte-modal），假定已打开")
+                return True
+    except Exception as e:
+        print(f"[封面] 直接点击 .article-cover-add 失败: {e}")
+
+    # 方案B：点击包含"预览"文字的封面区域
+    try:
+        preview_area = page.locator('div.article-cover-images-wrap, div.article-cover-preview, div.pgc-figure-cover-preview').first
+        if preview_area.count() > 0:
+            preview_area.scroll_into_view_if_needed()
+            preview_area.click(force=True)
+            print("[封面] 点击预览区域成功")
+            time.sleep(2)
+            try:
+                if page.locator('.byte-modal, .muse-dialog, [class*="dialog"], [class*="panel"]').first.is_visible(timeout=3000):
+                    print("[封面] 素材弹窗已打开（通过预览区域）")
+                    return True
+            except:
+                pass
+    except Exception as e:
+        print(f"[封面] 点击预览区域失败: {e}")
+
+    # 方案C：Tab 键盘导航兜底
+    print("[封面] 直接点击未成功，尝试 Tab 导航兜底...")
     try:
         page.locator('textarea[placeholder*="标题"]').first.click()
         time.sleep(0.5)
     except:
         pass
 
-    # 尝试按 Tab 移动到封面区域（默认 8 次，根据实际情况调整）
     tab_count = int(os.environ.get("COVER_TAB_COUNT", "8"))
-    print(f"[封面] 开始按 {tab_count} 次 Tab 键定位封面按钮...")
-
     for i in range(tab_count):
         page.keyboard.press("Tab")
-        time.sleep(0.2)
-        # 打印当前聚焦元素的信息，方便调试
-        focused_info = page.evaluate("""() => {
-            const el = document.activeElement;
-            if (!el) return 'no focus';
-            const tag = el.tagName.toLowerCase();
-            const text = (el.innerText || el.textContent || '').trim().substring(0, 30);
-            const cls = el.className ? el.className.toString() : '';
-            return `${tag} .${cls} text="${text}"`;
-        }""")
-        print(f"[封面] Tab {i+1}: {focused_info}")
-
-    # 按 Enter 键尝试打开
+        time.sleep(0.15)
     page.keyboard.press("Enter")
-    time.sleep(3)
-
-    # 检查是否打开了弹窗（出现 modal 或 drawer）
+    time.sleep(2)
     try:
-        modal = page.locator('.byte-modal, .muse-dialog, [class*="modal"]').first
-        if modal.is_visible(timeout=3000):
-            print("[封面] Tab 导航成功，素材弹窗已打开")
+        if page.locator('.byte-modal, .muse-dialog, [class*="modal"]').first.is_visible(timeout=3000):
+            print("[封面] Tab 导航兜底成功，素材弹窗已打开")
             return True
     except:
         pass
 
-    # 如果默认次数不对，尝试多按几次 Tab 再 Enter
-    for extra in range(5):
-        page.keyboard.press("Tab")
-        time.sleep(0.2)
-        page.keyboard.press("Enter")
-        time.sleep(2)
-        try:
-            if page.locator('.byte-modal, .muse-dialog').first.is_visible(timeout=2000):
-                print(f"[封面] 额外 Tab {extra+1} 次后弹窗打开")
-                return True
-        except:
-            continue
-
-    print("[封面] Tab 导航未能打开弹窗")
-    page.screenshot(path=f"cover_tab_fail_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+    print("[封面] 所有方案均未能打开弹窗")
+    page.screenshot(path=f"cover_add_fail_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
     return False
 
 
