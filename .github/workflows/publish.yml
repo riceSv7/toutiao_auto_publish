@@ -3,6 +3,7 @@ name: 定时发布头条文章
 on:
   schedule:
     # UTC时间 0点、4点、10点 = 北京时间 8点、12点、18点
+    # Schedule: daily 3 posts
     - cron: '0 0,4,10 * * *'
   workflow_dispatch:  # 允许手动触发
 
