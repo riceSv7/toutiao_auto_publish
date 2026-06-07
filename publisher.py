@@ -1234,84 +1234,47 @@ def _click_publish(page: Page) -> None:
     print(f"点击了: {clicked_text}")
     time.sleep(3)
 
-    # ========== 第二步：如果是「预览并发布」，等弹窗后点击「确认发布」 ==========
+    # ========== 第二步：如果是「预览并发布」，轮询「确认发布」按钮 ==========
     if '预览' not in clicked_text:
         print("发布按钮已点击（非预览模式），等待结果...")
         return
 
-    # 等待预览弹窗出现
-    dialog_appeared = False
-    for _ in range(10):
+    # 不依赖弹窗容器检测——直接轮询可见的「确认发布」按钮
+    second_click = None
+    for _ in range(12):
         time.sleep(0.5)
-        has_dialog = page.evaluate("""
+        second_click = page.evaluate("""
             () => {
-                const modals = document.querySelectorAll(
-                    '.byte-modal, .byte-dialog, .muse-dialog, ' +
-                    '[class*="dialog"], [class*="modal"], [class*="drawer"], [class*="popup"]'
+                const buttons = [...document.querySelectorAll('button')].filter(b =>
+                    b.offsetParent !== null
                 );
-                for (const m of modals) {
-                    if (m.offsetParent !== null) {
-                        const r = m.getBoundingClientRect();
-                        if (r.width > 200 && r.height > 200) return true;
-                    }
-                }
-                return false;
+                // 精确匹配「确认发布」
+                let btn = buttons.find(b => b.innerText.trim() === '确认发布');
+                // 兜底：包含「发布」但不含「预览」
+                if (!btn) btn = buttons.find(b => {
+                    const t = b.innerText.trim();
+                    return t.includes('确认发布') || (t.includes('发布') && !t.includes('预览'));
+                });
+                if (!btn) return null;
+                const span = btn.querySelector('span');
+                const target = span || btn;
+                const rect = target.getBoundingClientRect();
+                ['mousedown', 'mouseup', 'click'].forEach(name => {
+                    target.dispatchEvent(new MouseEvent(name, {
+                        bubbles: true, cancelable: true,
+                        clientX: rect.left + rect.width / 2,
+                        clientY: rect.top + rect.height / 2,
+                        button: 0
+                    }));
+                });
+                return btn.innerText.trim().slice(0, 30);
             }
         """)
-        if has_dialog:
-            dialog_appeared = True
+        if second_click:
+            print(f"二次点击: {second_click}")
+            time.sleep(3)
             break
-    if not dialog_appeared:
-        print("未检测到预览弹窗，可能已直接发布")
-        print("发布按钮已点击，等待结果...")
-        return
-
-    time.sleep(1)
-    # 在弹窗内查找「确认发布」（不限 className，弹窗按钮可能不用 primary）
-    second_click = page.evaluate("""
-        () => {
-            // 先定位可见弹窗容器
-            const containers = document.querySelectorAll(
-                '.byte-modal, .byte-dialog, .muse-dialog, ' +
-                '[class*="dialog"], [class*="modal"], [class*="drawer"], [class*="popup"]'
-            );
-            let dialog = null;
-            for (const c of containers) {
-                if (c.offsetParent !== null) {
-                    const r = c.getBoundingClientRect();
-                    if (r.width > 200 && r.height > 200) { dialog = c; break; }
-                }
-            }
-            const root = dialog || document;
-            const buttons = [...root.querySelectorAll('button')].filter(b =>
-                b.offsetParent !== null
-            );
-            // 精确匹配「确认发布」
-            let btn = buttons.find(b => b.innerText.trim() === '确认发布');
-            // 兜底：包含「发布」但不含「预览」
-            if (!btn) btn = buttons.find(b => {
-                const t = b.innerText.trim();
-                return t.includes('确认发布') || (t.includes('发布') && !t.includes('预览'));
-            });
-            if (!btn) return null;
-            const span = btn.querySelector('span');
-            const target = span || btn;
-            const rect = target.getBoundingClientRect();
-            ['mousedown', 'mouseup', 'click'].forEach(name => {
-                target.dispatchEvent(new MouseEvent(name, {
-                    bubbles: true, cancelable: true,
-                    clientX: rect.left + rect.width / 2,
-                    clientY: rect.top + rect.height / 2,
-                    button: 0
-                }));
-            });
-            return btn.innerText.trim().slice(0, 30);
-        }
-    """)
-    if second_click:
-        print(f"二次点击: {second_click}")
-        time.sleep(3)
-    else:
+    if not second_click:
         print("未找到二次确认按钮（可能已直接发布）")
 
     print("发布按钮已点击，等待结果...")
