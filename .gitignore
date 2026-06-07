@@ -4,3 +4,4 @@ cookies.xls
 __pycache__/
 *.png
 cover.jpg
+.topic_state.json

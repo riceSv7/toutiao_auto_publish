@@ -1,5 +1,4 @@
-import json
-import os
+import datetime
 import random
 import time
 import re
@@ -23,8 +22,6 @@ ROTATION_TOPICS = [
 SCIENCE_TOPIC = "前沿知识科普"
 SCIENCE_PROBABILITY = 0.15
 
-# 轮换状态文件
-STATE_FILE = os.path.join(os.path.dirname(__file__), ".topic_state.json")
 
 USER_MESSAGE_TEMPLATE = (
     "请生成一篇今日可发布的短文，主题：{topic}。"
@@ -48,34 +45,16 @@ SCIENCE_USER_MESSAGE = (
 )
 
 
-def _load_state() -> dict:
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except (json.JSONDecodeError, IOError):
-            pass
-    return {"index": 0}
-
-
-def _save_state(state: dict) -> None:
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f)
-
-
 def _pick_topic() -> tuple[str, bool]:
     """
     选择文章主题。返回 (主题, 是否为科普类)。
-    常规主题轮换，科普类 15% 概率触发。
+    常规主题按日期轮换（一年中的第几天 mod 主题数），科普类 15% 概率触发。
     """
     if random.random() < SCIENCE_PROBABILITY:
         return SCIENCE_TOPIC, True
 
-    state = _load_state()
-    idx = state.get("index", 0) % len(ROTATION_TOPICS)
+    idx = datetime.date.today().timetuple().tm_yday % len(ROTATION_TOPICS)
     topic = ROTATION_TOPICS[idx]
-    state["index"] = idx + 1
-    _save_state(state)
     return topic, False
 
 
@@ -127,22 +106,17 @@ def generate_article(api_key: str, max_retries: int = 3) -> tuple[str, str]:
             if is_science:
                 if not _verify_science_content(api_key, title, body):
                     print("[科普验证] 内容存疑，退回常规主题重试...")
-                    topic, is_science = _pick_topic()
-                    if is_science:
-                        state = _load_state()
-                        idx = state.get("index", 0) % len(ROTATION_TOPICS)
-                        topic = ROTATION_TOPICS[idx]
-                        state["index"] = idx + 1
-                        _save_state(state)
-                        is_science = False
+                    topic = random.choice(ROTATION_TOPICS)
+                    is_science = False
                     user_message = USER_MESSAGE_TEMPLATE.format(topic=topic)
+                    payload["messages"][1]["content"] = user_message
                     print(f"回退到常规主题：{topic}")
                     continue
 
             return title, body
 
         except (requests.HTTPError, requests.RequestException,
-                KeyError, json.JSONDecodeError, ValueError) as e:
+                KeyError, ValueError) as e:
             last_error = e
             status = (
                 e.response.status_code
